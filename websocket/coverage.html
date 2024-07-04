@@ -1,0 +1,3319 @@
+
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+		<title>websocket: Go Coverage Report</title>
+		<style>
+			body {
+				background: black;
+				color: rgb(80, 80, 80);
+			}
+			body, pre, #legend span {
+				font-family: Menlo, monospace;
+				font-weight: bold;
+			}
+			#topbar {
+				background: black;
+				position: fixed;
+				top: 0; left: 0; right: 0;
+				height: 42px;
+				border-bottom: 1px solid rgb(80, 80, 80);
+			}
+			#content {
+				margin-top: 50px;
+			}
+			#nav, #legend {
+				float: left;
+				margin-left: 10px;
+			}
+			#legend {
+				margin-top: 12px;
+			}
+			#nav {
+				margin-top: 10px;
+			}
+			#legend span {
+				margin: 0 5px;
+			}
+			.cov0 { color: rgb(192, 0, 0) }
+.cov1 { color: rgb(128, 128, 128) }
+.cov2 { color: rgb(116, 140, 131) }
+.cov3 { color: rgb(104, 152, 134) }
+.cov4 { color: rgb(92, 164, 137) }
+.cov5 { color: rgb(80, 176, 140) }
+.cov6 { color: rgb(68, 188, 143) }
+.cov7 { color: rgb(56, 200, 146) }
+.cov8 { color: rgb(44, 212, 149) }
+.cov9 { color: rgb(32, 224, 152) }
+.cov10 { color: rgb(20, 236, 155) }
+
+		</style>
+	</head>
+	<body>
+		<div id="topbar">
+			<div id="nav">
+				<select id="files">
+				
+				<option value="file0">nhooyr.io/websocket/accept.go (96.4%)</option>
+				
+				<option value="file1">nhooyr.io/websocket/close.go (92.8%)</option>
+				
+				<option value="file2">nhooyr.io/websocket/compress.go (97.4%)</option>
+				
+				<option value="file3">nhooyr.io/websocket/conn.go (86.9%)</option>
+				
+				<option value="file4">nhooyr.io/websocket/dial.go (92.0%)</option>
+				
+				<option value="file5">nhooyr.io/websocket/frame.go (94.0%)</option>
+				
+				<option value="file6">nhooyr.io/websocket/internal/bpool/bpool.go (83.3%)</option>
+				
+				<option value="file7">nhooyr.io/websocket/internal/errd/wrap.go (100.0%)</option>
+				
+				<option value="file8">nhooyr.io/websocket/internal/util/util.go (100.0%)</option>
+				
+				<option value="file9">nhooyr.io/websocket/internal/xsync/go.go (100.0%)</option>
+				
+				<option value="file10">nhooyr.io/websocket/internal/xsync/int64.go (100.0%)</option>
+				
+				<option value="file11">nhooyr.io/websocket/netconn.go (85.9%)</option>
+				
+				<option value="file12">nhooyr.io/websocket/netconn_notjs.go (66.7%)</option>
+				
+				<option value="file13">nhooyr.io/websocket/read.go (86.0%)</option>
+				
+				<option value="file14">nhooyr.io/websocket/write.go (88.6%)</option>
+				
+				<option value="file15">nhooyr.io/websocket/wsjson/wsjson.go (76.0%)</option>
+				
+				</select>
+			</div>
+			<div id="legend">
+				<span>not tracked</span>
+			
+				<span class="cov0">no coverage</span>
+				<span class="cov1">low coverage</span>
+				<span class="cov2">*</span>
+				<span class="cov3">*</span>
+				<span class="cov4">*</span>
+				<span class="cov5">*</span>
+				<span class="cov6">*</span>
+				<span class="cov7">*</span>
+				<span class="cov8">*</span>
+				<span class="cov9">*</span>
+				<span class="cov10">high coverage</span>
+			
+			</div>
+		</div>
+		<div id="content">
+		
+		<pre class="file" id="file0" style="display: none">//go:build !js
+// +build !js
+
+package websocket
+
+import (
+        "bytes"
+        "crypto/sha1"
+        "encoding/base64"
+        "errors"
+        "fmt"
+        "io"
+        "log"
+        "net/http"
+        "net/textproto"
+        "net/url"
+        "path/filepath"
+        "strings"
+
+        "nhooyr.io/websocket/internal/errd"
+)
+
+// AcceptOptions represents Accept's options.
+type AcceptOptions struct {
+        // Subprotocols lists the WebSocket subprotocols that Accept will negotiate with the client.
+        // The empty subprotocol will always be negotiated as per RFC 6455. If you would like to
+        // reject it, close the connection when c.Subprotocol() == "".
+        Subprotocols []string
+
+        // InsecureSkipVerify is used to disable Accept's origin verification behaviour.
+        //
+        // You probably want to use OriginPatterns instead.
+        InsecureSkipVerify bool
+
+        // OriginPatterns lists the host patterns for authorized origins.
+        // The request host is always authorized.
+        // Use this to enable cross origin WebSockets.
+        //
+        // i.e javascript running on example.com wants to access a WebSocket server at chat.example.com.
+        // In such a case, example.com is the origin and chat.example.com is the request host.
+        // One would set this field to []string{"example.com"} to authorize example.com to connect.
+        //
+        // Each pattern is matched case insensitively against the request origin host
+        // with filepath.Match.
+        // See https://golang.org/pkg/path/filepath/#Match
+        //
+        // Please ensure you understand the ramifications of enabling this.
+        // If used incorrectly your WebSocket server will be open to CSRF attacks.
+        //
+        // Do not use * as a pattern to allow any origin, prefer to use InsecureSkipVerify instead
+        // to bring attention to the danger of such a setting.
+        OriginPatterns []string
+
+        // CompressionMode controls the compression mode.
+        // Defaults to CompressionDisabled.
+        //
+        // See docs on CompressionMode for details.
+        CompressionMode CompressionMode
+
+        // CompressionThreshold controls the minimum size of a message before compression is applied.
+        //
+        // Defaults to 512 bytes for CompressionNoContextTakeover and 128 bytes
+        // for CompressionContextTakeover.
+        CompressionThreshold int
+}
+
+func (opts *AcceptOptions) cloneWithDefaults() *AcceptOptions <span class="cov6" title="101">{
+        var o AcceptOptions
+        if opts != nil </span><span class="cov4" title="19">{
+                o = *opts
+        }</span>
+        <span class="cov6" title="101">return &amp;o</span>
+}
+
+// Accept accepts a WebSocket handshake from a client and upgrades the
+// the connection to a WebSocket.
+//
+// Accept will not allow cross origin requests by default.
+// See the InsecureSkipVerify and OriginPatterns options to allow cross origin requests.
+//
+// Accept will write a response to w on all errors.
+func Accept(w http.ResponseWriter, r *http.Request, opts *AcceptOptions) (*Conn, error) <span class="cov6" title="102">{
+        return accept(w, r, opts)
+}</span>
+
+func accept(w http.ResponseWriter, r *http.Request, opts *AcceptOptions) (_ *Conn, err error) <span class="cov6" title="102">{
+        defer errd.Wrap(&amp;err, "failed to accept WebSocket connection")
+
+        errCode, err := verifyClientRequest(w, r)
+        if err != nil </span><span class="cov1" title="1">{
+                http.Error(w, err.Error(), errCode)
+                return nil, err
+        }</span>
+
+        <span class="cov6" title="101">opts = opts.cloneWithDefaults()
+        if !opts.InsecureSkipVerify </span><span class="cov6" title="100">{
+                err = authenticateOrigin(r, opts.OriginPatterns)
+                if err != nil </span><span class="cov1" title="2">{
+                        if errors.Is(err, filepath.ErrBadPattern) </span><span class="cov0" title="0">{
+                                log.Printf("websocket: %v", err)
+                                err = errors.New(http.StatusText(http.StatusForbidden))
+                        }</span>
+                        <span class="cov1" title="2">http.Error(w, err.Error(), http.StatusForbidden)
+                        return nil, err</span>
+                }
+        }
+
+        <span class="cov6" title="99">hj, ok := w.(http.Hijacker)
+        if !ok </span><span class="cov1" title="1">{
+                err = errors.New("http.ResponseWriter does not implement http.Hijacker")
+                http.Error(w, http.StatusText(http.StatusNotImplemented), http.StatusNotImplemented)
+                return nil, err
+        }</span>
+
+        <span class="cov6" title="98">w.Header().Set("Upgrade", "websocket")
+        w.Header().Set("Connection", "Upgrade")
+
+        key := r.Header.Get("Sec-WebSocket-Key")
+        w.Header().Set("Sec-WebSocket-Accept", secWebSocketAccept(key))
+
+        subproto := selectSubprotocol(r, opts.Subprotocols)
+        if subproto != "" </span><span class="cov1" title="1">{
+                w.Header().Set("Sec-WebSocket-Protocol", subproto)
+        }</span>
+
+        <span class="cov6" title="98">copts, ok := selectDeflate(websocketExtensions(r.Header), opts.CompressionMode)
+        if ok </span><span class="cov3" title="9">{
+                w.Header().Set("Sec-WebSocket-Extensions", copts.String())
+        }</span>
+
+        <span class="cov6" title="98">w.WriteHeader(http.StatusSwitchingProtocols)
+        // See https://github.com/nhooyr/websocket/issues/166
+        if ginWriter, ok := w.(interface {
+                WriteHeaderNow()
+        }); ok </span><span class="cov0" title="0">{
+                ginWriter.WriteHeaderNow()
+        }</span>
+
+        <span class="cov6" title="98">netConn, brw, err := hj.Hijack()
+        if err != nil </span><span class="cov2" title="3">{
+                err = fmt.Errorf("failed to hijack connection: %w", err)
+                http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+                return nil, err
+        }</span>
+
+        // https://github.com/golang/go/issues/32314
+        <span class="cov6" title="95">b, _ := brw.Reader.Peek(brw.Reader.Buffered())
+        brw.Reader.Reset(io.MultiReader(bytes.NewReader(b), netConn))
+
+        return newConn(connConfig{
+                subprotocol:    w.Header().Get("Sec-WebSocket-Protocol"),
+                rwc:            netConn,
+                client:         false,
+                copts:          copts,
+                flateThreshold: opts.CompressionThreshold,
+
+                br: brw.Reader,
+                bw: brw.Writer,
+        }), nil</span>
+}
+
+func verifyClientRequest(w http.ResponseWriter, r *http.Request) (errCode int, _ error) <span class="cov6" title="114">{
+        if !r.ProtoAtLeast(1, 1) </span><span class="cov1" title="1">{
+                return http.StatusUpgradeRequired, fmt.Errorf("WebSocket protocol violation: handshake request must be at least HTTP/1.1: %q", r.Proto)
+        }</span>
+
+        <span class="cov6" title="113">if !headerContainsTokenIgnoreCase(r.Header, "Connection", "Upgrade") </span><span class="cov1" title="2">{
+                w.Header().Set("Connection", "Upgrade")
+                w.Header().Set("Upgrade", "websocket")
+                return http.StatusUpgradeRequired, fmt.Errorf("WebSocket protocol violation: Connection header %q does not contain Upgrade", r.Header.Get("Connection"))
+        }</span>
+
+        <span class="cov6" title="111">if !headerContainsTokenIgnoreCase(r.Header, "Upgrade", "websocket") </span><span class="cov1" title="1">{
+                w.Header().Set("Connection", "Upgrade")
+                w.Header().Set("Upgrade", "websocket")
+                return http.StatusUpgradeRequired, fmt.Errorf("WebSocket protocol violation: Upgrade header %q does not contain websocket", r.Header.Get("Upgrade"))
+        }</span>
+
+        <span class="cov6" title="110">if r.Method != "GET" </span><span class="cov1" title="1">{
+                return http.StatusMethodNotAllowed, fmt.Errorf("WebSocket protocol violation: handshake request method is not GET but %q", r.Method)
+        }</span>
+
+        <span class="cov6" title="109">if r.Header.Get("Sec-WebSocket-Version") != "13" </span><span class="cov1" title="1">{
+                w.Header().Set("Sec-WebSocket-Version", "13")
+                return http.StatusBadRequest, fmt.Errorf("unsupported WebSocket protocol version (only 13 is supported): %q", r.Header.Get("Sec-WebSocket-Version"))
+        }</span>
+
+        <span class="cov6" title="108">websocketSecKeys := r.Header.Values("Sec-WebSocket-Key")
+        if len(websocketSecKeys) == 0 </span><span class="cov1" title="1">{
+                return http.StatusBadRequest, errors.New("WebSocket protocol violation: missing Sec-WebSocket-Key")
+        }</span>
+
+        <span class="cov6" title="107">if len(websocketSecKeys) &gt; 1 </span><span class="cov1" title="1">{
+                return http.StatusBadRequest, errors.New("WebSocket protocol violation: multiple Sec-WebSocket-Key headers")
+        }</span>
+
+        // The RFC states to remove any leading or trailing whitespace.
+        <span class="cov6" title="106">websocketSecKey := strings.TrimSpace(websocketSecKeys[0])
+        if v, err := base64.StdEncoding.DecodeString(websocketSecKey); err != nil || len(v) != 16 </span><span class="cov2" title="3">{
+                return http.StatusBadRequest, fmt.Errorf("WebSocket protocol violation: invalid Sec-WebSocket-Key %q, must be a 16 byte base64 encoded string", websocketSecKey)
+        }</span>
+
+        <span class="cov6" title="103">return 0, nil</span>
+}
+
+func authenticateOrigin(r *http.Request, originHosts []string) error <span class="cov6" title="107">{
+        origin := r.Header.Get("Origin")
+        if origin == "" </span><span class="cov6" title="99">{
+                return nil
+        }</span>
+
+        <span class="cov3" title="8">u, err := url.Parse(origin)
+        if err != nil </span><span class="cov1" title="1">{
+                return fmt.Errorf("failed to parse Origin header %q: %w", origin, err)
+        }</span>
+
+        <span class="cov3" title="7">if strings.EqualFold(r.Host, u.Host) </span><span class="cov1" title="2">{
+                return nil
+        }</span>
+
+        <span class="cov2" title="5">for _, hostPattern := range originHosts </span><span class="cov2" title="3">{
+                matched, err := match(hostPattern, u.Host)
+                if err != nil </span><span class="cov0" title="0">{
+                        return fmt.Errorf("failed to parse filepath pattern %q: %w", hostPattern, err)
+                }</span>
+                <span class="cov2" title="3">if matched </span><span class="cov1" title="1">{
+                        return nil
+                }</span>
+        }
+        <span class="cov2" title="4">if u.Host == "" </span><span class="cov1" title="1">{
+                return fmt.Errorf("request Origin %q is not a valid URL with a host", origin)
+        }</span>
+        <span class="cov2" title="3">return fmt.Errorf("request Origin %q is not authorized for Host %q", u.Host, r.Host)</span>
+}
+
+func match(pattern, s string) (bool, error) <span class="cov2" title="3">{
+        return filepath.Match(strings.ToLower(pattern), strings.ToLower(s))
+}</span>
+
+func selectSubprotocol(r *http.Request, subprotocols []string) string <span class="cov6" title="103">{
+        cps := headerTokens(r.Header, "Sec-WebSocket-Protocol")
+        for _, sp := range subprotocols </span><span class="cov3" title="7">{
+                for _, cp := range cps </span><span class="cov4" title="12">{
+                        if strings.EqualFold(sp, cp) </span><span class="cov2" title="4">{
+                                return cp
+                        }</span>
+                }
+        }
+        <span class="cov6" title="99">return ""</span>
+}
+
+func selectDeflate(extensions []websocketExtension, mode CompressionMode) (*compressionOptions, bool) <span class="cov6" title="103">{
+        if mode == CompressionDisabled </span><span class="cov6" title="88">{
+                return nil, false
+        }</span>
+        <span class="cov4" title="15">for _, ext := range extensions </span><span class="cov4" title="15">{
+                switch ext.name </span>{
+                // We used to implement x-webkit-deflate-frame too for Safari but Safari has bugs...
+                // See https://github.com/nhooyr/websocket/issues/218
+                case "permessage-deflate":<span class="cov4" title="15">
+                        copts, ok := acceptDeflate(ext, mode)
+                        if ok </span><span class="cov3" title="11">{
+                                return copts, true
+                        }</span>
+                }
+        }
+        <span class="cov2" title="4">return nil, false</span>
+}
+
+func acceptDeflate(ext websocketExtension, mode CompressionMode) (*compressionOptions, bool) <span class="cov4" title="15">{
+        copts := mode.opts()
+        for _, p := range ext.params </span><span class="cov4" title="12">{
+                switch p </span>{
+                case "client_no_context_takeover":<span class="cov2" title="3">
+                        copts.clientNoContextTakeover = true
+                        continue</span>
+                case "server_no_context_takeover":<span class="cov2" title="3">
+                        copts.serverNoContextTakeover = true
+                        continue</span>
+                case "client_max_window_bits",
+                        "server_max_window_bits=15":<span class="cov1" title="2">
+                        continue</span>
+                }
+
+                <span class="cov2" title="4">if strings.HasPrefix(p, "client_max_window_bits=") </span><span class="cov0" title="0">{
+                        // We can't adjust the deflate window, but decoding with a larger window is acceptable.
+                        continue</span>
+                }
+                <span class="cov2" title="4">return nil, false</span>
+        }
+        <span class="cov3" title="11">return copts, true</span>
+}
+
+func headerContainsTokenIgnoreCase(h http.Header, key, token string) bool <span class="cov9" title="1037">{
+        for _, t := range headerTokens(h, key) </span><span class="cov9" title="1038">{
+                if strings.EqualFold(t, token) </span><span class="cov9" title="1031">{
+                        return true
+                }</span>
+        }
+        <span class="cov3" title="6">return false</span>
+}
+
+type websocketExtension struct {
+        name   string
+        params []string
+}
+
+func websocketExtensions(h http.Header) []websocketExtension <span class="cov8" title="505">{
+        var exts []websocketExtension
+        extStrs := headerTokens(h, "Sec-WebSocket-Extensions")
+        for _, extStr := range extStrs </span><span class="cov7" title="172">{
+                if extStr == "" </span><span class="cov1" title="2">{
+                        continue</span>
+                }
+
+                <span class="cov7" title="170">vals := strings.Split(extStr, ";")
+                for i := range vals </span><span class="cov7" title="226">{
+                        vals[i] = strings.TrimSpace(vals[i])
+                }</span>
+
+                <span class="cov7" title="170">e := websocketExtension{
+                        name:   vals[0],
+                        params: vals[1:],
+                }
+
+                exts = append(exts, e)</span>
+        }
+        <span class="cov8" title="505">return exts</span>
+}
+
+func headerTokens(h http.Header, key string) []string <span class="cov10" title="1645">{
+        key = textproto.CanonicalMIMEHeaderKey(key)
+        var tokens []string
+        for _, v := range h[key] </span><span class="cov9" title="1212">{
+                v = strings.TrimSpace(v)
+                for _, t := range strings.Split(v, ",") </span><span class="cov9" title="1219">{
+                        t = strings.TrimSpace(t)
+                        tokens = append(tokens, t)
+                }</span>
+        }
+        <span class="cov10" title="1645">return tokens</span>
+}
+
+var keyGUID = []byte("258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+
+func secWebSocketAccept(secWebSocketKey string) string <span class="cov8" title="512">{
+        h := sha1.New()
+        h.Write([]byte(secWebSocketKey))
+        h.Write(keyGUID)
+
+        return base64.StdEncoding.EncodeToString(h.Sum(nil))
+}</span>
+</pre>
+		
+		<pre class="file" id="file1" style="display: none">//go:build !js
+// +build !js
+
+package websocket
+
+import (
+        "context"
+        "encoding/binary"
+        "errors"
+        "fmt"
+        "net"
+        "time"
+
+        "nhooyr.io/websocket/internal/errd"
+)
+
+// StatusCode represents a WebSocket status code.
+// https://tools.ietf.org/html/rfc6455#section-7.4
+type StatusCode int
+
+// https://www.iana.org/assignments/websocket/websocket.xhtml#close-code-number
+//
+// These are only the status codes defined by the protocol.
+//
+// You can define custom codes in the 3000-4999 range.
+// The 3000-3999 range is reserved for use by libraries, frameworks and applications.
+// The 4000-4999 range is reserved for private use.
+const (
+        StatusNormalClosure   StatusCode = 1000
+        StatusGoingAway       StatusCode = 1001
+        StatusProtocolError   StatusCode = 1002
+        StatusUnsupportedData StatusCode = 1003
+
+        // 1004 is reserved and so unexported.
+        statusReserved StatusCode = 1004
+
+        // StatusNoStatusRcvd cannot be sent in a close message.
+        // It is reserved for when a close message is received without
+        // a status code.
+        StatusNoStatusRcvd StatusCode = 1005
+
+        // StatusAbnormalClosure is exported for use only with Wasm.
+        // In non Wasm Go, the returned error will indicate whether the
+        // connection was closed abnormally.
+        StatusAbnormalClosure StatusCode = 1006
+
+        StatusInvalidFramePayloadData StatusCode = 1007
+        StatusPolicyViolation         StatusCode = 1008
+        StatusMessageTooBig           StatusCode = 1009
+        StatusMandatoryExtension      StatusCode = 1010
+        StatusInternalError           StatusCode = 1011
+        StatusServiceRestart          StatusCode = 1012
+        StatusTryAgainLater           StatusCode = 1013
+        StatusBadGateway              StatusCode = 1014
+
+        // StatusTLSHandshake is only exported for use with Wasm.
+        // In non Wasm Go, the returned error will indicate whether there was
+        // a TLS handshake failure.
+        StatusTLSHandshake StatusCode = 1015
+)
+
+// CloseError is returned when the connection is closed with a status and reason.
+//
+// Use Go 1.13's errors.As to check for this error.
+// Also see the CloseStatus helper.
+type CloseError struct {
+        Code   StatusCode
+        Reason string
+}
+
+func (ce CloseError) Error() string <span class="cov9" title="924">{
+        return fmt.Sprintf("status = %v and reason = %q", ce.Code, ce.Reason)
+}</span>
+
+// CloseStatus is a convenience wrapper around Go 1.13's errors.As to grab
+// the status code from a CloseError.
+//
+// -1 will be returned if the passed error is nil or not a CloseError.
+func CloseStatus(err error) StatusCode <span class="cov9" title="1077">{
+        var ce CloseError
+        if errors.As(err, &amp;ce) </span><span class="cov8" title="514">{
+                return ce.Code
+        }</span>
+        <span class="cov8" title="563">return -1</span>
+}
+
+// Close performs the WebSocket close handshake with the given status code and reason.
+//
+// It will write a WebSocket close frame with a timeout of 5s and then wait 5s for
+// the peer to send a close frame.
+// All data messages received from the peer during the close handshake will be discarded.
+//
+// The connection can only be closed once. Additional calls to Close
+// are no-ops.
+//
+// The maximum length of reason must be 125 bytes. Avoid
+// sending a dynamic reason.
+//
+// Close will unblock all goroutines interacting with the connection once
+// complete.
+func (c *Conn) Close(code StatusCode, reason string) error <span class="cov8" title="417">{
+        defer c.wg.Wait()
+        return c.closeHandshake(code, reason)
+}</span>
+
+// CloseNow closes the WebSocket connection without attempting a close handshake.
+// Use when you do not want the overhead of the close handshake.
+func (c *Conn) CloseNow() (err error) <span class="cov8" title="325">{
+        defer c.wg.Wait()
+        defer errd.Wrap(&amp;err, "failed to close WebSocket")
+
+        if c.isClosed() </span><span class="cov8" title="315">{
+                return net.ErrClosed
+        }</span>
+
+        <span class="cov3" title="10">c.close(nil)
+        return c.closeErr</span>
+}
+
+func (c *Conn) closeHandshake(code StatusCode, reason string) (err error) <span class="cov8" title="417">{
+        defer errd.Wrap(&amp;err, "failed to close WebSocket")
+
+        writeErr := c.writeClose(code, reason)
+        closeHandshakeErr := c.waitCloseHandshake()
+
+        if writeErr != nil </span><span class="cov8" title="325">{
+                return writeErr
+        }</span>
+
+        <span class="cov6" title="92">if CloseStatus(closeHandshakeErr) == -1 &amp;&amp; !errors.Is(net.ErrClosed, closeHandshakeErr) </span><span class="cov0" title="0">{
+                return closeHandshakeErr
+        }</span>
+
+        <span class="cov6" title="92">return nil</span>
+}
+
+func (c *Conn) writeClose(code StatusCode, reason string) error <span class="cov9" title="900">{
+        c.closeMu.Lock()
+        wroteClose := c.wroteClose
+        c.wroteClose = true
+        c.closeMu.Unlock()
+        if wroteClose </span><span class="cov8" title="417">{
+                return net.ErrClosed
+        }</span>
+
+        <span class="cov8" title="483">ce := CloseError{
+                Code:   code,
+                Reason: reason,
+        }
+
+        var p []byte
+        var marshalErr error
+        if ce.Code != StatusNoStatusRcvd </span><span class="cov8" title="482">{
+                p, marshalErr = ce.bytes()
+        }</span>
+
+        <span class="cov8" title="483">writeErr := c.writeControl(context.Background(), opClose, p)
+        if CloseStatus(writeErr) != -1 </span><span class="cov0" title="0">{
+                // Not a real error if it's due to a close frame being received.
+                writeErr = nil
+        }</span>
+
+        // We do this after in case there was an error writing the close frame.
+        <span class="cov8" title="483">c.setCloseErr(fmt.Errorf("sent close frame: %w", ce))
+
+        if marshalErr != nil </span><span class="cov1" title="1">{
+                return marshalErr
+        }</span>
+        <span class="cov8" title="482">return writeErr</span>
+}
+
+func (c *Conn) waitCloseHandshake() error <span class="cov8" title="417">{
+        defer c.close(nil)
+
+        ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+        defer cancel()
+
+        err := c.readMu.lock(ctx)
+        if err != nil </span><span class="cov8" title="389">{
+                return err
+        }</span>
+        <span class="cov5" title="28">defer c.readMu.unlock()
+
+        if c.readCloseFrameErr != nil </span><span class="cov0" title="0">{
+                return c.readCloseFrameErr
+        }</span>
+
+        <span class="cov5" title="28">for i := int64(0); i &lt; c.msgReader.payloadLength; i++ </span><span class="cov4" title="12">{
+                _, err := c.br.ReadByte()
+                if err != nil </span><span class="cov0" title="0">{
+                        return err
+                }</span>
+        }
+
+        <span class="cov5" title="28">for </span><span class="cov5" title="29">{
+                h, err := c.readLoop(ctx)
+                if err != nil </span><span class="cov5" title="28">{
+                        return err
+                }</span>
+
+                <span class="cov1" title="1">for i := int64(0); i &lt; h.payloadLength; i++ </span><span class="cov0" title="0">{
+                        _, err := c.br.ReadByte()
+                        if err != nil </span><span class="cov0" title="0">{
+                                return err
+                        }</span>
+                }
+        }
+}
+
+func parseClosePayload(p []byte) (CloseError, error) <span class="cov8" title="456">{
+        if len(p) == 0 </span><span class="cov2" title="4">{
+                return CloseError{
+                        Code: StatusNoStatusRcvd,
+                }, nil
+        }</span>
+
+        <span class="cov8" title="452">if len(p) &lt; 2 </span><span class="cov1" title="2">{
+                return CloseError{}, fmt.Errorf("close payload %q too small, cannot even contain the 2 byte status code", p)
+        }</span>
+
+        <span class="cov8" title="450">ce := CloseError{
+                Code:   StatusCode(binary.BigEndian.Uint16(p)),
+                Reason: string(p[2:]),
+        }
+
+        if !validWireCloseCode(ce.Code) </span><span class="cov4" title="12">{
+                return CloseError{}, fmt.Errorf("invalid status code %v", ce.Code)
+        }</span>
+
+        <span class="cov8" title="438">return ce, nil</span>
+}
+
+// See http://www.iana.org/assignments/websocket/websocket.xhtml#close-code-number
+// and https://tools.ietf.org/html/rfc6455#section-7.4.1
+func validWireCloseCode(code StatusCode) bool <span class="cov9" title="940">{
+        switch code </span>{
+        case statusReserved, StatusNoStatusRcvd, StatusAbnormalClosure, StatusTLSHandshake:<span class="cov2" title="4">
+                return false</span>
+        }
+
+        <span class="cov9" title="936">if code &gt;= StatusNormalClosure &amp;&amp; code &lt;= StatusBadGateway </span><span class="cov9" title="914">{
+                return true
+        }</span>
+        <span class="cov4" title="22">if code &gt;= 3000 &amp;&amp; code &lt;= 4999 </span><span class="cov3" title="10">{
+                return true
+        }</span>
+
+        <span class="cov4" title="12">return false</span>
+}
+
+func (ce CloseError) bytes() ([]byte, error) <span class="cov8" title="482">{
+        p, err := ce.bytesErr()
+        if err != nil </span><span class="cov1" title="1">{
+                err = fmt.Errorf("failed to marshal close frame: %w", err)
+                ce = CloseError{
+                        Code: StatusInternalError,
+                }
+                p, _ = ce.bytesErr()
+        }</span>
+        <span class="cov8" title="482">return p, err</span>
+}
+
+const maxCloseReason = maxControlPayload - 2
+
+func (ce CloseError) bytesErr() ([]byte, error) <span class="cov8" title="486">{
+        if len(ce.Reason) &gt; maxCloseReason </span><span class="cov1" title="1">{
+                return nil, fmt.Errorf("reason string max is %v but got %q with length %v", maxCloseReason, ce.Reason, len(ce.Reason))
+        }</span>
+
+        <span class="cov8" title="485">if !validWireCloseCode(ce.Code) </span><span class="cov1" title="2">{
+                return nil, fmt.Errorf("status code %v cannot be set", ce.Code)
+        }</span>
+
+        <span class="cov8" title="483">buf := make([]byte, 2+len(ce.Reason))
+        binary.BigEndian.PutUint16(buf, uint16(ce.Code))
+        copy(buf[2:], ce.Reason)
+        return buf, nil</span>
+}
+
+func (c *Conn) setCloseErr(err error) <span class="cov9" title="966">{
+        c.closeMu.Lock()
+        c.setCloseErrLocked(err)
+        c.closeMu.Unlock()
+}</span>
+
+func (c *Conn) setCloseErrLocked(err error) <span class="cov10" title="1459">{
+        if c.closeErr == nil &amp;&amp; err != nil </span><span class="cov8" title="485">{
+                c.closeErr = fmt.Errorf("WebSocket closed: %w", err)
+        }</span>
+}
+
+func (c *Conn) isClosed() bool <span class="cov9" title="1240">{
+        select </span>{
+        case &lt;-c.closed:<span class="cov9" title="737">
+                return true</span>
+        default:<span class="cov8" title="503">
+                return false</span>
+        }
+}
+</pre>
+		
+		<pre class="file" id="file2" style="display: none">//go:build !js
+// +build !js
+
+package websocket
+
+import (
+        "compress/flate"
+        "io"
+        "sync"
+)
+
+// CompressionMode represents the modes available to the permessage-deflate extension.
+// See https://tools.ietf.org/html/rfc7692
+//
+// Works in all modern browsers except Safari which does not implement the permessage-deflate extension.
+//
+// Compression is only used if the peer supports the mode selected.
+type CompressionMode int
+
+const (
+        // CompressionDisabled disables the negotiation of the permessage-deflate extension.
+        //
+        // This is the default. Do not enable compression without benchmarking for your particular use case first.
+        CompressionDisabled CompressionMode = iota
+
+        // CompressionContextTakeover compresses each message greater than 128 bytes reusing the 32 KB sliding window from
+        // previous messages. i.e compression context across messages is preserved.
+        //
+        // As most WebSocket protocols are text based and repetitive, this compression mode can be very efficient.
+        //
+        // The memory overhead is a fixed 32 KB sliding window, a fixed 1.2 MB flate.Writer and a sync.Pool of 40 KB flate.Reader's
+        // that are used when reading and then returned.
+        //
+        // Thus, it uses more memory than CompressionNoContextTakeover but compresses more efficiently.
+        //
+        // If the peer does not support CompressionContextTakeover then we will fall back to CompressionNoContextTakeover.
+        CompressionContextTakeover
+
+        // CompressionNoContextTakeover compresses each message greater than 512 bytes. Each message is compressed with
+        // a new 1.2 MB flate.Writer pulled from a sync.Pool. Each message is read with a 40 KB flate.Reader pulled from
+        // a sync.Pool.
+        //
+        // This means less efficient compression as the sliding window from previous messages will not be used but the
+        // memory overhead will be lower as there will be no fixed cost for the flate.Writer nor the 32 KB sliding window.
+        // Especially if the connections are long lived and seldom written to.
+        //
+        // Thus, it uses less memory than CompressionContextTakeover but compresses less efficiently.
+        //
+        // If the peer does not support CompressionNoContextTakeover then we will fall back to CompressionDisabled.
+        CompressionNoContextTakeover
+)
+
+func (m CompressionMode) opts() *compressionOptions <span class="cov4" title="331">{
+        return &amp;compressionOptions{
+                clientNoContextTakeover: m == CompressionNoContextTakeover,
+                serverNoContextTakeover: m == CompressionNoContextTakeover,
+        }
+}</span>
+
+type compressionOptions struct {
+        clientNoContextTakeover bool
+        serverNoContextTakeover bool
+}
+
+func (copts *compressionOptions) String() string <span class="cov4" title="317">{
+        s := "permessage-deflate"
+        if copts.clientNoContextTakeover </span><span class="cov2" title="8">{
+                s += "; client_no_context_takeover"
+        }</span>
+        <span class="cov4" title="317">if copts.serverNoContextTakeover </span><span class="cov2" title="8">{
+                s += "; server_no_context_takeover"
+        }</span>
+        <span class="cov4" title="317">return s</span>
+}
+
+// These bytes are required to get flate.Reader to return.
+// They are removed when sending to avoid the overhead as
+// WebSocket framing tell's when the message has ended but then
+// we need to add them back otherwise flate.Reader keeps
+// trying to read more bytes.
+const deflateMessageTail = "\x00\x00\xff\xff"
+
+type trimLastFourBytesWriter struct {
+        w    io.Writer
+        tail []byte
+}
+
+func (tw *trimLastFourBytesWriter) reset() <span class="cov7" title="195690">{
+        if tw != nil &amp;&amp; tw.tail != nil </span><span class="cov7" title="131247">{
+                tw.tail = tw.tail[:0]
+        }</span>
+}
+
+func (tw *trimLastFourBytesWriter) Write(p []byte) (int, error) <span class="cov10" title="7494229">{
+        if tw.tail == nil </span><span class="cov3" title="142">{
+                tw.tail = make([]byte, 0, 4)
+        }</span>
+
+        <span class="cov10" title="7494229">extra := len(tw.tail) + len(p) - 4
+
+        if extra &lt;= 0 </span><span class="cov6" title="11877">{
+                tw.tail = append(tw.tail, p...)
+                return len(p), nil
+        }</span>
+
+        // Now we need to write as many extra bytes as we can from the previous tail.
+        <span class="cov9" title="7482352">if extra &gt; len(tw.tail) </span><span class="cov9" title="7155321">{
+                extra = len(tw.tail)
+        }</span>
+        <span class="cov9" title="7482352">if extra &gt; 0 </span><span class="cov9" title="7362792">{
+                _, err := tw.w.Write(tw.tail[:extra])
+                if err != nil </span><span class="cov0" title="0">{
+                        return 0, err
+                }</span>
+
+                // Shift remaining bytes in tail over.
+                <span class="cov9" title="7362792">n := copy(tw.tail, tw.tail[extra:])
+                tw.tail = tw.tail[:n]</span>
+        }
+
+        // If p is less than or equal to 4 bytes,
+        // all of it is is part of the tail.
+        <span class="cov9" title="7482352">if len(p) &lt;= 4 </span><span class="cov8" title="327031">{
+                tw.tail = append(tw.tail, p...)
+                return len(p), nil
+        }</span>
+
+        // Otherwise, only the last 4 bytes are.
+        <span class="cov9" title="7155321">tw.tail = append(tw.tail, p[len(p)-4:]...)
+
+        p = p[:len(p)-4]
+        n, err := tw.w.Write(p)
+        return n + 4, err</span>
+}
+
+var flateReaderPool sync.Pool
+
+func getFlateReader(r io.Reader, dict []byte) io.Reader <span class="cov7" title="149387">{
+        fr, ok := flateReaderPool.Get().(io.Reader)
+        if !ok </span><span class="cov7" title="41502">{
+                return flate.NewReaderDict(r, dict)
+        }</span>
+        <span class="cov7" title="107885">fr.(flate.Resetter).Reset(r, dict)
+        return fr</span>
+}
+
+func putFlateReader(fr io.Reader) <span class="cov7" title="149387">{
+        flateReaderPool.Put(fr)
+}</span>
+
+var flateWriterPool sync.Pool
+
+func getFlateWriter(w io.Writer) *flate.Writer <span class="cov6" title="31438">{
+        fw, ok := flateWriterPool.Get().(*flate.Writer)
+        if !ok </span><span class="cov6" title="11731">{
+                fw, _ = flate.NewWriter(w, flate.BestSpeed)
+                return fw
+        }</span>
+        <span class="cov6" title="19707">fw.Reset(w)
+        return fw</span>
+}
+
+func putFlateWriter(w *flate.Writer) <span class="cov6" title="31438">{
+        flateWriterPool.Put(w)
+}</span>
+
+type slidingWindow struct {
+        buf []byte
+}
+
+var swPoolMu sync.RWMutex
+var swPool = map[int]*sync.Pool{}
+
+func slidingWindowPool(n int) *sync.Pool <span class="cov4" title="253">{
+        swPoolMu.RLock()
+        p, ok := swPool[n]
+        swPoolMu.RUnlock()
+        if ok </span><span class="cov3" title="153">{
+                return p
+        }</span>
+
+        <span class="cov3" title="100">p = &amp;sync.Pool{}
+
+        swPoolMu.Lock()
+        swPool[n] = p
+        swPoolMu.Unlock()
+
+        return p</span>
+}
+
+func (sw *slidingWindow) init(n int) <span class="cov7" title="148154">{
+        if sw.buf != nil </span><span class="cov7" title="147901">{
+                return
+        }</span>
+
+        <span class="cov4" title="253">if n == 0 </span><span class="cov0" title="0">{
+                n = 32768
+        }</span>
+
+        <span class="cov4" title="253">p := slidingWindowPool(n)
+        sw2, ok := p.Get().(*slidingWindow)
+        if ok </span><span class="cov2" title="26">{
+                *sw = *sw2
+        }</span> else<span class="cov4" title="227"> {
+                sw.buf = make([]byte, 0, n)
+        }</span>
+}
+
+func (sw *slidingWindow) close() <span class="cov3" title="154">{
+        sw.buf = sw.buf[:0]
+        swPoolMu.Lock()
+        swPool[cap(sw.buf)].Put(sw)
+        swPoolMu.Unlock()
+}</span>
+
+func (sw *slidingWindow) write(p []byte) <span class="cov8" title="435632">{
+        if len(p) &gt;= cap(sw.buf) </span><span class="cov7" title="208106">{
+                sw.buf = sw.buf[:cap(sw.buf)]
+                p = p[len(p)-cap(sw.buf):]
+                copy(sw.buf, p)
+                return
+        }</span>
+
+        <span class="cov8" title="227526">left := cap(sw.buf) - len(sw.buf)
+        if left &lt; len(p) </span><span class="cov7" title="65642">{
+                // We need to shift spaceNeeded bytes from the end to make room for p at the end.
+                spaceNeeded := len(p) - left
+                copy(sw.buf, sw.buf[spaceNeeded:])
+                sw.buf = sw.buf[:len(sw.buf)-spaceNeeded]
+        }</span>
+
+        <span class="cov8" title="227526">sw.buf = append(sw.buf, p...)</span>
+}
+</pre>
+		
+		<pre class="file" id="file3" style="display: none">//go:build !js
+// +build !js
+
+package websocket
+
+import (
+        "bufio"
+        "context"
+        "errors"
+        "fmt"
+        "io"
+        "net"
+        "runtime"
+        "strconv"
+        "sync"
+        "sync/atomic"
+)
+
+// MessageType represents the type of a WebSocket message.
+// See https://tools.ietf.org/html/rfc6455#section-5.6
+type MessageType int
+
+// MessageType constants.
+const (
+        // MessageText is for UTF-8 encoded text messages like JSON.
+        MessageText MessageType = iota + 1
+        // MessageBinary is for binary messages like protobufs.
+        MessageBinary
+)
+
+// Conn represents a WebSocket connection.
+// All methods may be called concurrently except for Reader and Read.
+//
+// You must always read from the connection. Otherwise control
+// frames will not be handled. See Reader and CloseRead.
+//
+// Be sure to call Close on the connection when you
+// are finished with it to release associated resources.
+//
+// On any error from any method, the connection is closed
+// with an appropriate reason.
+//
+// This applies to context expirations as well unfortunately.
+// See https://github.com/nhooyr/websocket/issues/242#issuecomment-633182220
+type Conn struct {
+        noCopy
+
+        subprotocol    string
+        rwc            io.ReadWriteCloser
+        client         bool
+        copts          *compressionOptions
+        flateThreshold int
+        br             *bufio.Reader
+        bw             *bufio.Writer
+
+        readTimeout  chan context.Context
+        writeTimeout chan context.Context
+
+        // Read state.
+        readMu            *mu
+        readHeaderBuf     [8]byte
+        readControlBuf    [maxControlPayload]byte
+        msgReader         *msgReader
+        readCloseFrameErr error
+
+        // Write state.
+        msgWriter      *msgWriter
+        writeFrameMu   *mu
+        writeBuf       []byte
+        writeHeaderBuf [8]byte
+        writeHeader    header
+
+        wg         sync.WaitGroup
+        closed     chan struct{}
+        closeMu    sync.Mutex
+        closeErr   error
+        wroteClose bool
+
+        pingCounter   int32
+        activePingsMu sync.Mutex
+        activePings   map[string]chan&lt;- struct{}
+}
+
+type connConfig struct {
+        subprotocol    string
+        rwc            io.ReadWriteCloser
+        client         bool
+        copts          *compressionOptions
+        flateThreshold int
+
+        br *bufio.Reader
+        bw *bufio.Writer
+}
+
+func newConn(cfg connConfig) *Conn <span class="cov4" title="493">{
+        c := &amp;Conn{
+                subprotocol:    cfg.subprotocol,
+                rwc:            cfg.rwc,
+                client:         cfg.client,
+                copts:          cfg.copts,
+                flateThreshold: cfg.flateThreshold,
+
+                br: cfg.br,
+                bw: cfg.bw,
+
+                readTimeout:  make(chan context.Context),
+                writeTimeout: make(chan context.Context),
+
+                closed:      make(chan struct{}),
+                activePings: make(map[string]chan&lt;- struct{}),
+        }
+
+        c.readMu = newMu(c)
+        c.writeFrameMu = newMu(c)
+
+        c.msgReader = newMsgReader(c)
+
+        c.msgWriter = newMsgWriter(c)
+        if c.client </span><span class="cov4" title="398">{
+                c.writeBuf = extractBufioWriterBuf(c.bw, c.rwc)
+        }</span>
+
+        <span class="cov4" title="493">if c.flate() &amp;&amp; c.flateThreshold == 0 </span><span class="cov3" title="156">{
+                c.flateThreshold = 128
+                if !c.msgWriter.flateContextTakeover() </span><span class="cov2" title="42">{
+                        c.flateThreshold = 512
+                }</span>
+        }
+
+        <span class="cov4" title="493">runtime.SetFinalizer(c, func(c *Conn) </span><span class="cov0" title="0">{
+                c.close(errors.New("connection garbage collected"))
+        }</span>)
+
+        <span class="cov4" title="493">c.wg.Add(1)
+        go func() </span><span class="cov4" title="493">{
+                defer c.wg.Done()
+                c.timeoutLoop()
+        }</span>()
+
+        <span class="cov4" title="493">return c</span>
+}
+
+// Subprotocol returns the negotiated subprotocol.
+// An empty string means the default protocol.
+func (c *Conn) Subprotocol() string <span class="cov0" title="0">{
+        return c.subprotocol
+}</span>
+
+func (c *Conn) close(err error) <span class="cov4" title="915">{
+        c.closeMu.Lock()
+        defer c.closeMu.Unlock()
+
+        if c.isClosed() </span><span class="cov4" title="422">{
+                return
+        }</span>
+        <span class="cov4" title="493">if err == nil </span><span class="cov3" title="53">{
+                err = c.rwc.Close()
+        }</span>
+        <span class="cov4" title="493">c.setCloseErrLocked(err)
+
+        close(c.closed)
+        runtime.SetFinalizer(c, nil)
+
+        // Have to close after c.closed is closed to ensure any goroutine that wakes up
+        // from the connection being closed also sees that c.closed is closed and returns
+        // closeErr.
+        c.rwc.Close()
+
+        c.wg.Add(1)
+        go func() </span><span class="cov4" title="493">{
+                defer c.wg.Done()
+                c.msgWriter.close()
+                c.msgReader.close()
+        }</span>()
+}
+
+func (c *Conn) timeoutLoop() <span class="cov4" title="493">{
+        readCtx := context.Background()
+        writeCtx := context.Background()
+
+        for </span><span class="cov10" title="41974729">{
+                select </span>{
+                case &lt;-c.closed:<span class="cov4" title="493">
+                        return</span>
+
+                case writeCtx = &lt;-c.writeTimeout:<span class="cov9" title="29877058"></span>
+                case readCtx = &lt;-c.readTimeout:<span class="cov9" title="12097178"></span>
+
+                case &lt;-readCtx.Done():<span class="cov0" title="0">
+                        c.setCloseErr(fmt.Errorf("read timed out: %w", readCtx.Err()))
+                        c.wg.Add(1)
+                        go func() </span><span class="cov0" title="0">{
+                                defer c.wg.Done()
+                                c.writeError(StatusPolicyViolation, errors.New("read timed out"))
+                        }</span>()
+                case &lt;-writeCtx.Done():<span class="cov0" title="0">
+                        c.close(fmt.Errorf("write timed out: %w", writeCtx.Err()))
+                        return</span>
+                }
+        }
+}
+
+func (c *Conn) flate() bool <span class="cov7" title="663518">{
+        return c.copts != nil
+}</span>
+
+// Ping sends a ping to the peer and waits for a pong.
+// Use this to measure latency or ensure the peer is responsive.
+// Ping must be called concurrently with Reader as it does
+// not read from the connection but instead waits for a Reader call
+// to read the pong.
+//
+// TCP Keepalives should suffice for most use cases.
+func (c *Conn) Ping(ctx context.Context) error <span class="cov4" title="623">{
+        p := atomic.AddInt32(&amp;c.pingCounter, 1)
+
+        err := c.ping(ctx, strconv.Itoa(int(p)))
+        if err != nil </span><span class="cov3" title="65">{
+                return fmt.Errorf("failed to ping: %w", err)
+        }</span>
+        <span class="cov4" title="558">return nil</span>
+}
+
+func (c *Conn) ping(ctx context.Context, p string) error <span class="cov4" title="623">{
+        pong := make(chan struct{}, 1)
+
+        c.activePingsMu.Lock()
+        c.activePings[p] = pong
+        c.activePingsMu.Unlock()
+
+        defer func() </span><span class="cov4" title="623">{
+                c.activePingsMu.Lock()
+                delete(c.activePings, p)
+                c.activePingsMu.Unlock()
+        }</span>()
+
+        <span class="cov4" title="623">err := c.writeControl(ctx, opPing, []byte(p))
+        if err != nil </span><span class="cov3" title="64">{
+                return err
+        }</span>
+
+        <span class="cov4" title="559">select </span>{
+        case &lt;-c.closed:<span class="cov0" title="0">
+                return net.ErrClosed</span>
+        case &lt;-ctx.Done():<span class="cov1" title="1">
+                err := fmt.Errorf("failed to wait for pong: %w", ctx.Err())
+                c.close(err)
+                return err</span>
+        case &lt;-pong:<span class="cov4" title="558">
+                return nil</span>
+        }
+}
+
+type mu struct {
+        c  *Conn
+        ch chan struct{}
+}
+
+func newMu(c *Conn) *mu <span class="cov4" title="1988">{
+        return &amp;mu{
+                c:  c,
+                ch: make(chan struct{}, 1),
+        }
+}</span>
+
+func (m *mu) forceLock() <span class="cov4" title="1426">{
+        m.ch &lt;- struct{}{}
+}</span>
+
+func (m *mu) tryLock() bool <span class="cov1" title="4">{
+        select </span>{
+        case m.ch &lt;- struct{}{}:<span class="cov1" title="4">
+                return true</span>
+        default:<span class="cov0" title="0">
+                return false</span>
+        }
+}
+
+func (m *mu) lock(ctx context.Context) error <span class="cov9" title="16711067">{
+        select </span>{
+        case &lt;-m.c.closed:<span class="cov3" title="291">
+                return net.ErrClosed</span>
+        case &lt;-ctx.Done():<span class="cov1" title="1">
+                err := fmt.Errorf("failed to acquire lock: %w", ctx.Err())
+                m.c.close(err)
+                return err</span>
+        case m.ch &lt;- struct{}{}:<span class="cov9" title="16710775">
+                // To make sure the connection is certainly alive.
+                // As it's possible the send on m.ch was selected
+                // over the receive on closed.
+                select </span>{
+                case &lt;-m.c.closed:<span class="cov3" title="111">
+                        // Make sure to release.
+                        m.unlock()
+                        return net.ErrClosed</span>
+                default:<span class="cov9" title="16710664"></span>
+                }
+                <span class="cov9" title="16710664">return nil</span>
+        }
+}
+
+func (m *mu) unlock() <span class="cov9" title="16710818">{
+        select </span>{
+        case &lt;-m.ch:<span class="cov9" title="16710818"></span>
+        default:<span class="cov0" title="0"></span>
+        }
+}
+
+type noCopy struct{}
+
+func (*noCopy) Lock() {<span class="cov0" title="0">}</span>
+</pre>
+		
+		<pre class="file" id="file4" style="display: none">//go:build !js
+// +build !js
+
+package websocket
+
+import (
+        "bufio"
+        "bytes"
+        "context"
+        "crypto/rand"
+        "encoding/base64"
+        "fmt"
+        "io"
+        "net/http"
+        "net/url"
+        "strings"
+        "sync"
+        "time"
+
+        "nhooyr.io/websocket/internal/errd"
+)
+
+// DialOptions represents Dial's options.
+type DialOptions struct {
+        // HTTPClient is used for the connection.
+        // Its Transport must return writable bodies for WebSocket handshakes.
+        // http.Transport does beginning with Go 1.12.
+        HTTPClient *http.Client
+
+        // HTTPHeader specifies the HTTP headers included in the handshake request.
+        HTTPHeader http.Header
+
+        // Host optionally overrides the Host HTTP header to send. If empty, the value
+        // of URL.Host will be used.
+        Host string
+
+        // Subprotocols lists the WebSocket subprotocols to negotiate with the server.
+        Subprotocols []string
+
+        // CompressionMode controls the compression mode.
+        // Defaults to CompressionDisabled.
+        //
+        // See docs on CompressionMode for details.
+        CompressionMode CompressionMode
+
+        // CompressionThreshold controls the minimum size of a message before compression is applied.
+        //
+        // Defaults to 512 bytes for CompressionNoContextTakeover and 128 bytes
+        // for CompressionContextTakeover.
+        CompressionThreshold int
+}
+
+func (opts *DialOptions) cloneWithDefaults(ctx context.Context) (context.Context, context.CancelFunc, *DialOptions) <span class="cov9" title="840">{
+        var cancel context.CancelFunc
+
+        var o DialOptions
+        if opts != nil </span><span class="cov8" title="398">{
+                o = *opts
+        }</span>
+        <span class="cov9" title="840">if o.HTTPClient == nil </span><span class="cov9" title="741">{
+                o.HTTPClient = http.DefaultClient
+        }</span>
+        <span class="cov9" title="840">if o.HTTPClient.Timeout &gt; 0 </span><span class="cov0" title="0">{
+                ctx, cancel = context.WithTimeout(ctx, o.HTTPClient.Timeout)
+
+                newClient := *o.HTTPClient
+                newClient.Timeout = 0
+                o.HTTPClient = &amp;newClient
+        }</span>
+        <span class="cov9" title="840">if o.HTTPHeader == nil </span><span class="cov9" title="840">{
+                o.HTTPHeader = http.Header{}
+        }</span>
+        <span class="cov9" title="840">newClient := *o.HTTPClient
+        oldCheckRedirect := o.HTTPClient.CheckRedirect
+        newClient.CheckRedirect = func(req *http.Request, via []*http.Request) error </span><span class="cov1" title="1">{
+                switch req.URL.Scheme </span>{
+                case "ws":<span class="cov0" title="0">
+                        req.URL.Scheme = "http"</span>
+                case "wss":<span class="cov1" title="1">
+                        req.URL.Scheme = "https"</span>
+                }
+                <span class="cov1" title="1">if oldCheckRedirect != nil </span><span class="cov0" title="0">{
+                        return oldCheckRedirect(req, via)
+                }</span>
+                <span class="cov1" title="1">return nil</span>
+        }
+        <span class="cov9" title="840">o.HTTPClient = &amp;newClient
+
+        return ctx, cancel, &amp;o</span>
+}
+
+// Dial performs a WebSocket handshake on url.
+//
+// The response is the WebSocket handshake response from the server.
+// You never need to close resp.Body yourself.
+//
+// If an error occurs, the returned response may be non nil.
+// However, you can only read the first 1024 bytes of the body.
+//
+// This function requires at least Go 1.12 as it uses a new feature
+// in net/http to perform WebSocket handshakes.
+// See docs on the HTTPClient option and https://github.com/golang/go/issues/26937#issuecomment-415855861
+//
+// URLs with http/https schemes will work and are interpreted as ws/wss.
+func Dial(ctx context.Context, u string, opts *DialOptions) (*Conn, *http.Response, error) <span class="cov9" title="835">{
+        return dial(ctx, u, opts, nil)
+}</span>
+
+func dial(ctx context.Context, urls string, opts *DialOptions, rand io.Reader) (_ *Conn, _ *http.Response, err error) <span class="cov9" title="840">{
+        defer errd.Wrap(&amp;err, "failed to WebSocket dial")
+
+        var cancel context.CancelFunc
+        ctx, cancel, opts = opts.cloneWithDefaults(ctx)
+        if cancel != nil </span><span class="cov0" title="0">{
+                defer cancel()
+        }</span>
+
+        <span class="cov9" title="840">secWebSocketKey, err := secWebSocketKey(rand)
+        if err != nil </span><span class="cov1" title="1">{
+                return nil, nil, fmt.Errorf("failed to generate Sec-WebSocket-Key: %w", err)
+        }</span>
+
+        <span class="cov9" title="839">var copts *compressionOptions
+        if opts.CompressionMode != CompressionDisabled </span><span class="cov8" title="307">{
+                copts = opts.CompressionMode.opts()
+        }</span>
+
+        <span class="cov9" title="839">resp, err := handshakeRequest(ctx, urls, opts, copts, secWebSocketKey)
+        if err != nil </span><span class="cov9" title="438">{
+                return nil, resp, err
+        }</span>
+        <span class="cov9" title="401">respBody := resp.Body
+        resp.Body = nil
+        defer func() </span><span class="cov9" title="401">{
+                if err != nil </span><span class="cov2" title="3">{
+                        // We read a bit of the body for easier debugging.
+                        r := io.LimitReader(respBody, 1024)
+
+                        timer := time.AfterFunc(time.Second*3, func() </span><span class="cov0" title="0">{
+                                respBody.Close()
+                        }</span>)
+                        <span class="cov2" title="3">defer timer.Stop()
+
+                        b, _ := io.ReadAll(r)
+                        respBody.Close()
+                        resp.Body = io.NopCloser(bytes.NewReader(b))</span>
+                }
+        }()
+
+        <span class="cov9" title="401">copts, err = verifyServerResponse(opts, copts, secWebSocketKey, resp)
+        if err != nil </span><span class="cov1" title="2">{
+                return nil, resp, err
+        }</span>
+
+        <span class="cov8" title="399">rwc, ok := respBody.(io.ReadWriteCloser)
+        if !ok </span><span class="cov1" title="1">{
+                return nil, resp, fmt.Errorf("response body is not a io.ReadWriteCloser: %T", respBody)
+        }</span>
+
+        <span class="cov8" title="398">return newConn(connConfig{
+                subprotocol:    resp.Header.Get("Sec-WebSocket-Protocol"),
+                rwc:            rwc,
+                client:         true,
+                copts:          copts,
+                flateThreshold: opts.CompressionThreshold,
+                br:             getBufioReader(rwc),
+                bw:             getBufioWriter(rwc),
+        }), resp, nil</span>
+}
+
+func handshakeRequest(ctx context.Context, urls string, opts *DialOptions, copts *compressionOptions, secWebSocketKey string) (*http.Response, error) <span class="cov9" title="839">{
+        u, err := url.Parse(urls)
+        if err != nil </span><span class="cov1" title="1">{
+                return nil, fmt.Errorf("failed to parse url: %w", err)
+        }</span>
+
+        <span class="cov9" title="838">switch u.Scheme </span>{
+        case "ws":<span class="cov9" title="834">
+                u.Scheme = "http"</span>
+        case "wss":<span class="cov1" title="1">
+                u.Scheme = "https"</span>
+        case "http", "https":<span class="cov1" title="2"></span>
+        default:<span class="cov1" title="1">
+                return nil, fmt.Errorf("unexpected url scheme: %q", u.Scheme)</span>
+        }
+
+        <span class="cov9" title="837">req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
+        if err != nil </span><span class="cov1" title="1">{
+                return nil, fmt.Errorf("failed to create new http request: %w", err)
+        }</span>
+        <span class="cov9" title="836">if len(opts.Host) &gt; 0 </span><span class="cov1" title="1">{
+                req.Host = opts.Host
+        }</span>
+        <span class="cov9" title="836">req.Header = opts.HTTPHeader.Clone()
+        req.Header.Set("Connection", "Upgrade")
+        req.Header.Set("Upgrade", "websocket")
+        req.Header.Set("Sec-WebSocket-Version", "13")
+        req.Header.Set("Sec-WebSocket-Key", secWebSocketKey)
+        if len(opts.Subprotocols) &gt; 0 </span><span class="cov0" title="0">{
+                req.Header.Set("Sec-WebSocket-Protocol", strings.Join(opts.Subprotocols, ","))
+        }</span>
+        <span class="cov9" title="836">if copts != nil </span><span class="cov8" title="307">{
+                req.Header.Set("Sec-WebSocket-Extensions", copts.String())
+        }</span>
+
+        <span class="cov9" title="836">resp, err := opts.HTTPClient.Do(req)
+        if err != nil </span><span class="cov9" title="435">{
+                return nil, fmt.Errorf("failed to send handshake request: %w", err)
+        }</span>
+        <span class="cov9" title="401">return resp, nil</span>
+}
+
+func secWebSocketKey(rr io.Reader) (string, error) <span class="cov10" title="848">{
+        if rr == nil </span><span class="cov9" title="835">{
+                rr = rand.Reader
+        }</span>
+        <span class="cov10" title="848">b := make([]byte, 16)
+        _, err := io.ReadFull(rr, b)
+        if err != nil </span><span class="cov1" title="1">{
+                return "", fmt.Errorf("failed to read random data from rand.Reader: %w", err)
+        }</span>
+        <span class="cov9" title="847">return base64.StdEncoding.EncodeToString(b), nil</span>
+}
+
+func verifyServerResponse(opts *DialOptions, copts *compressionOptions, secWebSocketKey string, resp *http.Response) (*compressionOptions, error) <span class="cov9" title="409">{
+        if resp.StatusCode != http.StatusSwitchingProtocols </span><span class="cov1" title="2">{
+                return nil, fmt.Errorf("expected handshake response status code %v but got %v", http.StatusSwitchingProtocols, resp.StatusCode)
+        }</span>
+
+        <span class="cov9" title="407">if !headerContainsTokenIgnoreCase(resp.Header, "Connection", "Upgrade") </span><span class="cov1" title="1">{
+                return nil, fmt.Errorf("WebSocket protocol violation: Connection header %q does not contain Upgrade", resp.Header.Get("Connection"))
+        }</span>
+
+        <span class="cov9" title="406">if !headerContainsTokenIgnoreCase(resp.Header, "Upgrade", "WebSocket") </span><span class="cov1" title="2">{
+                return nil, fmt.Errorf("WebSocket protocol violation: Upgrade header %q does not contain websocket", resp.Header.Get("Upgrade"))
+        }</span>
+
+        <span class="cov9" title="404">if resp.Header.Get("Sec-WebSocket-Accept") != secWebSocketAccept(secWebSocketKey) </span><span class="cov1" title="1">{
+                return nil, fmt.Errorf("WebSocket protocol violation: invalid Sec-WebSocket-Accept %q, key %q",
+                        resp.Header.Get("Sec-WebSocket-Accept"),
+                        secWebSocketKey,
+                )
+        }</span>
+
+        <span class="cov9" title="403">err := verifySubprotocol(opts.Subprotocols, resp)
+        if err != nil </span><span class="cov1" title="1">{
+                return nil, err
+        }</span>
+
+        <span class="cov9" title="402">return verifyServerExtensions(copts, resp.Header)</span>
+}
+
+func verifySubprotocol(subprotos []string, resp *http.Response) error <span class="cov9" title="403">{
+        proto := resp.Header.Get("Sec-WebSocket-Protocol")
+        if proto == "" </span><span class="cov9" title="402">{
+                return nil
+        }</span>
+
+        <span class="cov1" title="1">for _, sp2 := range subprotos </span><span class="cov1" title="1">{
+                if strings.EqualFold(sp2, proto) </span><span class="cov0" title="0">{
+                        return nil
+                }</span>
+        }
+
+        <span class="cov1" title="1">return fmt.Errorf("WebSocket protocol violation: unexpected Sec-WebSocket-Protocol from server: %q", proto)</span>
+}
+
+func verifyServerExtensions(copts *compressionOptions, h http.Header) (*compressionOptions, error) <span class="cov9" title="402">{
+        exts := websocketExtensions(h)
+        if len(exts) == 0 </span><span class="cov8" title="248">{
+                return nil, nil
+        }</span>
+
+        <span class="cov7" title="154">ext := exts[0]
+        if ext.name != "permessage-deflate" || len(exts) &gt; 1 || copts == nil </span><span class="cov1" title="1">{
+                return nil, fmt.Errorf("WebSocket protcol violation: unsupported extensions from server: %+v", exts[1:])
+        }</span>
+
+        <span class="cov7" title="153">_copts := *copts
+        copts = &amp;_copts
+
+        for _, p := range ext.params </span><span class="cov6" title="43">{
+                switch p </span>{
+                case "client_no_context_takeover":<span class="cov5" title="39">
+                        copts.clientNoContextTakeover = true
+                        continue</span>
+                case "server_no_context_takeover":<span class="cov2" title="3">
+                        copts.serverNoContextTakeover = true
+                        continue</span>
+                }
+                <span class="cov1" title="1">if strings.HasPrefix(p, "server_max_window_bits=") </span><span class="cov0" title="0">{
+                        // We can't adjust the deflate window, but decoding with a larger window is acceptable.
+                        continue</span>
+                }
+
+                <span class="cov1" title="1">return nil, fmt.Errorf("unsupported permessage-deflate parameter: %q", p)</span>
+        }
+
+        <span class="cov7" title="152">return copts, nil</span>
+}
+
+var bufioReaderPool sync.Pool
+
+func getBufioReader(r io.Reader) *bufio.Reader <span class="cov9" title="558">{
+        br, ok := bufioReaderPool.Get().(*bufio.Reader)
+        if !ok </span><span class="cov8" title="280">{
+                return bufio.NewReader(r)
+        }</span>
+        <span class="cov8" title="278">br.Reset(r)
+        return br</span>
+}
+
+func putBufioReader(br *bufio.Reader) <span class="cov9" title="558">{
+        bufioReaderPool.Put(br)
+}</span>
+
+var bufioWriterPool sync.Pool
+
+func getBufioWriter(w io.Writer) *bufio.Writer <span class="cov8" title="398">{
+        bw, ok := bufioWriterPool.Get().(*bufio.Writer)
+        if !ok </span><span class="cov8" title="206">{
+                return bufio.NewWriter(w)
+        }</span>
+        <span class="cov8" title="192">bw.Reset(w)
+        return bw</span>
+}
+
+func putBufioWriter(bw *bufio.Writer) <span class="cov8" title="398">{
+        bufioWriterPool.Put(bw)
+}</span>
+</pre>
+		
+		<pre class="file" id="file5" style="display: none">//go:build !js
+
+package websocket
+
+import (
+        "bufio"
+        "encoding/binary"
+        "fmt"
+        "io"
+        "math"
+        "math/bits"
+
+        "nhooyr.io/websocket/internal/errd"
+)
+
+// opcode represents a WebSocket opcode.
+type opcode int
+
+// https://tools.ietf.org/html/rfc6455#section-11.8.
+const (
+        opContinuation opcode = iota
+        opText
+        opBinary
+        // 3 - 7 are reserved for further non-control frames.
+        _
+        _
+        _
+        _
+        _
+        opClose
+        opPing
+        opPong
+        // 11-16 are reserved for further control frames.
+)
+
+// header represents a WebSocket frame header.
+// See https://tools.ietf.org/html/rfc6455#section-5.2.
+type header struct {
+        fin    bool
+        rsv1   bool
+        rsv2   bool
+        rsv3   bool
+        opcode opcode
+
+        payloadLength int64
+
+        masked  bool
+        maskKey uint32
+}
+
+// readFrameHeader reads a header from the reader.
+// See https://tools.ietf.org/html/rfc6455#section-5.2.
+func readFrameHeader(r *bufio.Reader, readBuf []byte) (h header, err error) <span class="cov9" title="2953412">{
+        defer errd.Wrap(&amp;err, "failed to read frame header")
+
+        b, err := r.ReadByte()
+        if err != nil </span><span class="cov0" title="0">{
+                return header{}, err
+        }</span>
+
+        <span class="cov9" title="2953412">h.fin = b&amp;(1&lt;&lt;7) != 0
+        h.rsv1 = b&amp;(1&lt;&lt;6) != 0
+        h.rsv2 = b&amp;(1&lt;&lt;5) != 0
+        h.rsv3 = b&amp;(1&lt;&lt;4) != 0
+
+        h.opcode = opcode(b &amp; 0xf)
+
+        b, err = r.ReadByte()
+        if err != nil </span><span class="cov0" title="0">{
+                return header{}, err
+        }</span>
+
+        <span class="cov9" title="2953412">h.masked = b&amp;(1&lt;&lt;7) != 0
+
+        payloadLength := b &amp;^ (1 &lt;&lt; 7)
+        switch </span>{
+        case payloadLength &lt; 126:<span class="cov7" title="222498">
+                h.payloadLength = int64(payloadLength)</span>
+        case payloadLength == 126:<span class="cov9" title="2718930">
+                _, err = io.ReadFull(r, readBuf[:2])
+                h.payloadLength = int64(binary.BigEndian.Uint16(readBuf))</span>
+        case payloadLength == 127:<span class="cov6" title="11984">
+                _, err = io.ReadFull(r, readBuf)
+                h.payloadLength = int64(binary.BigEndian.Uint64(readBuf))</span>
+        }
+        <span class="cov9" title="2953412">if err != nil </span><span class="cov0" title="0">{
+                return header{}, err
+        }</span>
+
+        <span class="cov9" title="2953412">if h.payloadLength &lt; 0 </span><span class="cov0" title="0">{
+                return header{}, fmt.Errorf("received negative payload length: %v", h.payloadLength)
+        }</span>
+
+        <span class="cov9" title="2953412">if h.masked </span><span class="cov6" title="35912">{
+                _, err = io.ReadFull(r, readBuf[:4])
+                if err != nil </span><span class="cov0" title="0">{
+                        return header{}, err
+                }</span>
+                <span class="cov6" title="35912">h.maskKey = binary.LittleEndian.Uint32(readBuf)</span>
+        }
+
+        <span class="cov9" title="2953412">return h, nil</span>
+}
+
+// maxControlPayload is the maximum length of a control frame payload.
+// See https://tools.ietf.org/html/rfc6455#section-5.5.
+const maxControlPayload = 125
+
+// writeFrameHeader writes the bytes of the header to w.
+// See https://tools.ietf.org/html/rfc6455#section-5.2
+func writeFrameHeader(h header, w *bufio.Writer, buf []byte) (err error) <span class="cov9" title="14948538">{
+        defer errd.Wrap(&amp;err, "failed to write frame header")
+
+        var b byte
+        if h.fin </span><span class="cov7" title="202311">{
+                b |= 1 &lt;&lt; 7
+        }</span>
+        <span class="cov9" title="14948538">if h.rsv1 </span><span class="cov7" title="136373">{
+                b |= 1 &lt;&lt; 6
+        }</span>
+        <span class="cov9" title="14948538">if h.rsv2 </span><span class="cov5" title="5006">{
+                b |= 1 &lt;&lt; 5
+        }</span>
+        <span class="cov9" title="14948538">if h.rsv3 </span><span class="cov5" title="5024">{
+                b |= 1 &lt;&lt; 4
+        }</span>
+
+        <span class="cov9" title="14948538">b |= byte(h.opcode)
+
+        err = w.WriteByte(b)
+        if err != nil </span><span class="cov0" title="0">{
+                return err
+        }</span>
+
+        <span class="cov9" title="14948538">lengthByte := byte(0)
+        if h.masked </span><span class="cov9" title="14904397">{
+                lengthByte |= 1 &lt;&lt; 7
+        }</span>
+
+        <span class="cov9" title="14948538">switch </span>{
+        case h.payloadLength &gt; math.MaxUint16:<span class="cov6" title="10015">
+                lengthByte |= 127</span>
+        case h.payloadLength &gt; 125:<span class="cov9" title="7173004">
+                lengthByte |= 126</span>
+        case h.payloadLength &gt;= 0:<span class="cov9" title="7765519">
+                lengthByte |= byte(h.payloadLength)</span>
+        }
+        <span class="cov9" title="14948538">err = w.WriteByte(lengthByte)
+        if err != nil </span><span class="cov0" title="0">{
+                return err
+        }</span>
+
+        <span class="cov9" title="14948538">switch </span>{
+        case h.payloadLength &gt; math.MaxUint16:<span class="cov6" title="10015">
+                binary.BigEndian.PutUint64(buf, uint64(h.payloadLength))
+                _, err = w.Write(buf)</span>
+        case h.payloadLength &gt; 125:<span class="cov9" title="7173004">
+                binary.BigEndian.PutUint16(buf, uint16(h.payloadLength))
+                _, err = w.Write(buf[:2])</span>
+        }
+        <span class="cov9" title="14948538">if err != nil </span><span class="cov0" title="0">{
+                return err
+        }</span>
+
+        <span class="cov9" title="14948538">if h.masked </span><span class="cov9" title="14904397">{
+                binary.LittleEndian.PutUint32(buf, h.maskKey)
+                _, err = w.Write(buf[:4])
+                if err != nil </span><span class="cov0" title="0">{
+                        return err
+                }</span>
+        }
+
+        <span class="cov9" title="14948538">return nil</span>
+}
+
+// mask applies the WebSocket masking algorithm to p
+// with the given key.
+// See https://tools.ietf.org/html/rfc6455#section-5.3
+//
+// The returned value is the correctly rotated key to
+// to continue to mask/unmask the message.
+//
+// It is optimized for LittleEndian and expects the key
+// to be in little endian.
+//
+// See https://github.com/golang/go/issues/31586
+func mask(key uint32, b []byte) uint32 <span class="cov10" title="15289337">{
+        if len(b) &gt;= 8 </span><span class="cov9" title="7921811">{
+                key64 := uint64(key)&lt;&lt;32 | uint64(key)
+
+                // At some point in the future we can clean these unrolled loops up.
+                // See https://github.com/golang/go/issues/31586#issuecomment-487436401
+
+                // Then we xor until b is less than 128 bytes.
+                for len(b) &gt;= 128 </span><span class="cov9" title="12620213">{
+                        v := binary.LittleEndian.Uint64(b)
+                        binary.LittleEndian.PutUint64(b, v^key64)
+                        v = binary.LittleEndian.Uint64(b[8:16])
+                        binary.LittleEndian.PutUint64(b[8:16], v^key64)
+                        v = binary.LittleEndian.Uint64(b[16:24])
+                        binary.LittleEndian.PutUint64(b[16:24], v^key64)
+                        v = binary.LittleEndian.Uint64(b[24:32])
+                        binary.LittleEndian.PutUint64(b[24:32], v^key64)
+                        v = binary.LittleEndian.Uint64(b[32:40])
+                        binary.LittleEndian.PutUint64(b[32:40], v^key64)
+                        v = binary.LittleEndian.Uint64(b[40:48])
+                        binary.LittleEndian.PutUint64(b[40:48], v^key64)
+                        v = binary.LittleEndian.Uint64(b[48:56])
+                        binary.LittleEndian.PutUint64(b[48:56], v^key64)
+                        v = binary.LittleEndian.Uint64(b[56:64])
+                        binary.LittleEndian.PutUint64(b[56:64], v^key64)
+                        v = binary.LittleEndian.Uint64(b[64:72])
+                        binary.LittleEndian.PutUint64(b[64:72], v^key64)
+                        v = binary.LittleEndian.Uint64(b[72:80])
+                        binary.LittleEndian.PutUint64(b[72:80], v^key64)
+                        v = binary.LittleEndian.Uint64(b[80:88])
+                        binary.LittleEndian.PutUint64(b[80:88], v^key64)
+                        v = binary.LittleEndian.Uint64(b[88:96])
+                        binary.LittleEndian.PutUint64(b[88:96], v^key64)
+                        v = binary.LittleEndian.Uint64(b[96:104])
+                        binary.LittleEndian.PutUint64(b[96:104], v^key64)
+                        v = binary.LittleEndian.Uint64(b[104:112])
+                        binary.LittleEndian.PutUint64(b[104:112], v^key64)
+                        v = binary.LittleEndian.Uint64(b[112:120])
+                        binary.LittleEndian.PutUint64(b[112:120], v^key64)
+                        v = binary.LittleEndian.Uint64(b[120:128])
+                        binary.LittleEndian.PutUint64(b[120:128], v^key64)
+                        b = b[128:]
+                }</span>
+
+                // Then we xor until b is less than 64 bytes.
+                <span class="cov9" title="7921811">for len(b) &gt;= 64 </span><span class="cov9" title="7187158">{
+                        v := binary.LittleEndian.Uint64(b)
+                        binary.LittleEndian.PutUint64(b, v^key64)
+                        v = binary.LittleEndian.Uint64(b[8:16])
+                        binary.LittleEndian.PutUint64(b[8:16], v^key64)
+                        v = binary.LittleEndian.Uint64(b[16:24])
+                        binary.LittleEndian.PutUint64(b[16:24], v^key64)
+                        v = binary.LittleEndian.Uint64(b[24:32])
+                        binary.LittleEndian.PutUint64(b[24:32], v^key64)
+                        v = binary.LittleEndian.Uint64(b[32:40])
+                        binary.LittleEndian.PutUint64(b[32:40], v^key64)
+                        v = binary.LittleEndian.Uint64(b[40:48])
+                        binary.LittleEndian.PutUint64(b[40:48], v^key64)
+                        v = binary.LittleEndian.Uint64(b[48:56])
+                        binary.LittleEndian.PutUint64(b[48:56], v^key64)
+                        v = binary.LittleEndian.Uint64(b[56:64])
+                        binary.LittleEndian.PutUint64(b[56:64], v^key64)
+                        b = b[64:]
+                }</span>
+
+                // Then we xor until b is less than 32 bytes.
+                <span class="cov9" title="7921811">for len(b) &gt;= 32 </span><span class="cov9" title="7029549">{
+                        v := binary.LittleEndian.Uint64(b)
+                        binary.LittleEndian.PutUint64(b, v^key64)
+                        v = binary.LittleEndian.Uint64(b[8:16])
+                        binary.LittleEndian.PutUint64(b[8:16], v^key64)
+                        v = binary.LittleEndian.Uint64(b[16:24])
+                        binary.LittleEndian.PutUint64(b[16:24], v^key64)
+                        v = binary.LittleEndian.Uint64(b[24:32])
+                        binary.LittleEndian.PutUint64(b[24:32], v^key64)
+                        b = b[32:]
+                }</span>
+
+                // Then we xor until b is less than 16 bytes.
+                <span class="cov9" title="7921811">for len(b) &gt;= 16 </span><span class="cov8" title="776554">{
+                        v := binary.LittleEndian.Uint64(b)
+                        binary.LittleEndian.PutUint64(b, v^key64)
+                        v = binary.LittleEndian.Uint64(b[8:16])
+                        binary.LittleEndian.PutUint64(b[8:16], v^key64)
+                        b = b[16:]
+                }</span>
+
+                // Then we xor until b is less than 8 bytes.
+                <span class="cov9" title="7921811">for len(b) &gt;= 8 </span><span class="cov9" title="7141105">{
+                        v := binary.LittleEndian.Uint64(b)
+                        binary.LittleEndian.PutUint64(b, v^key64)
+                        b = b[8:]
+                }</span>
+        }
+
+        // Then we xor until b is less than 4 bytes.
+        <span class="cov10" title="15289337">for len(b) &gt;= 4 </span><span class="cov9" title="14264191">{
+                v := binary.LittleEndian.Uint32(b)
+                binary.LittleEndian.PutUint32(b, v^key)
+                b = b[4:]
+        }</span>
+
+        // xor remaining bytes.
+        <span class="cov10" title="15289337">for i := range b </span><span class="cov8" title="943855">{
+                b[i] ^= byte(key)
+                key = bits.RotateLeft32(key, -8)
+        }</span>
+
+        <span class="cov10" title="15289337">return key</span>
+}
+</pre>
+		
+		<pre class="file" id="file6" style="display: none">package bpool
+
+import (
+        "bytes"
+        "sync"
+)
+
+var bpool sync.Pool
+
+// Get returns a buffer from the pool or creates a new one if
+// the pool is empty.
+func Get() *bytes.Buffer <span class="cov10" title="3">{
+        b := bpool.Get()
+        if b == nil </span><span class="cov10" title="3">{
+                return &amp;bytes.Buffer{}
+        }</span>
+        <span class="cov0" title="0">return b.(*bytes.Buffer)</span>
+}
+
+// Put returns a buffer into the pool.
+func Put(b *bytes.Buffer) <span class="cov10" title="3">{
+        b.Reset()
+        bpool.Put(b)
+}</span>
+</pre>
+		
+		<pre class="file" id="file7" style="display: none">package errd
+
+import (
+        "fmt"
+)
+
+// Wrap wraps err with fmt.Errorf if err is non nil.
+// Intended for use with defer and a named error return.
+// Inspired by https://github.com/golang/go/issues/32676.
+func Wrap(err *error, f string, v ...interface{}) <span class="cov10" title="33216852">{
+        if *err != nil </span><span class="cov4" title="1545">{
+                *err = fmt.Errorf(f+": %w", append(v, *err)...)
+        }</span>
+}
+</pre>
+		
+		<pre class="file" id="file8" style="display: none">package util
+
+// WriterFunc is used to implement one off io.Writers.
+type WriterFunc func(p []byte) (int, error)
+
+func (f WriterFunc) Write(p []byte) (int, error) <span class="cov10" title="14538257">{
+        return f(p)
+}</span>
+
+// ReaderFunc is used to implement one off io.Readers.
+type ReaderFunc func(p []byte) (int, error)
+
+func (f ReaderFunc) Read(p []byte) (int, error) <span class="cov9" title="3468384">{
+        return f(p)
+}</span>
+</pre>
+		
+		<pre class="file" id="file9" style="display: none">package xsync
+
+import (
+        "fmt"
+        "runtime/debug"
+)
+
+// Go allows running a function in another goroutine
+// and waiting for its error.
+func Go(fn func() error) &lt;-chan error <span class="cov10" title="123">{
+        errs := make(chan error, 1)
+        go func() </span><span class="cov10" title="123">{
+                defer func() </span><span class="cov10" title="123">{
+                        r := recover()
+                        if r != nil </span><span class="cov1" title="1">{
+                                select </span>{
+                                case errs &lt;- fmt.Errorf("panic in go fn: %v, %s", r, debug.Stack()):<span class="cov1" title="1"></span>
+                                default:<span class="cov0" title="0"></span>
+                                }
+                        }
+                }()
+                <span class="cov10" title="123">errs &lt;- fn()</span>
+        }()
+
+        <span class="cov10" title="123">return errs</span>
+}
+</pre>
+		
+		<pre class="file" id="file10" style="display: none">package xsync
+
+import (
+        "sync/atomic"
+)
+
+// Int64 represents an atomic int64.
+type Int64 struct {
+        // We do not use atomic.Load/StoreInt64 since it does not
+        // work on 32 bit computers but we need 64 bit integers.
+        i atomic.Value
+}
+
+// Load loads the int64.
+func (v *Int64) Load() int64 <span class="cov10" title="196183">{
+        i, _ := v.i.Load().(int64)
+        return i
+}</span>
+
+// Store stores the int64.
+func (v *Int64) Store(i int64) <span class="cov5" title="830">{
+        v.i.Store(i)
+}</span>
+</pre>
+		
+		<pre class="file" id="file11" style="display: none">package websocket
+
+import (
+        "context"
+        "fmt"
+        "io"
+        "math"
+        "net"
+        "sync/atomic"
+        "time"
+)
+
+// NetConn converts a *websocket.Conn into a net.Conn.
+//
+// It's for tunneling arbitrary protocols over WebSockets.
+// Few users of the library will need this but it's tricky to implement
+// correctly and so provided in the library.
+// See https://github.com/nhooyr/websocket/issues/100.
+//
+// Every Write to the net.Conn will correspond to a message write of
+// the given type on *websocket.Conn.
+//
+// The passed ctx bounds the lifetime of the net.Conn. If cancelled,
+// all reads and writes on the net.Conn will be cancelled.
+//
+// If a message is read that is not of the correct type, the connection
+// will be closed with StatusUnsupportedData and an error will be returned.
+//
+// Close will close the *websocket.Conn with StatusNormalClosure.
+//
+// When a deadline is hit and there is an active read or write goroutine, the
+// connection will be closed. This is different from most net.Conn implementations
+// where only the reading/writing goroutines are interrupted but the connection
+// is kept alive.
+//
+// The Addr methods will return the real addresses for connections obtained
+// from websocket.Accept. But for connections obtained from websocket.Dial, a mock net.Addr
+// will be returned that gives "websocket" for Network() and "websocket/unknown-addr" for
+// String(). This is because websocket.Dial only exposes a io.ReadWriteCloser instead of the
+// full net.Conn to us.
+//
+// When running as WASM, the Addr methods will always return the mock address described above.
+//
+// A received StatusNormalClosure or StatusGoingAway close frame will be translated to
+// io.EOF when reading.
+//
+// Furthermore, the ReadLimit is set to -1 to disable it.
+func NetConn(ctx context.Context, c *Conn, msgType MessageType) net.Conn <span class="cov6" title="8">{
+        c.SetReadLimit(-1)
+
+        nc := &amp;netConn{
+                c:       c,
+                msgType: msgType,
+                readMu:  newMu(c),
+                writeMu: newMu(c),
+        }
+
+        nc.writeCtx, nc.writeCancel = context.WithCancel(ctx)
+        nc.readCtx, nc.readCancel = context.WithCancel(ctx)
+
+        nc.writeTimer = time.AfterFunc(math.MaxInt64, func() </span><span class="cov2" title="2">{
+                if !nc.writeMu.tryLock() </span><span class="cov0" title="0">{
+                        // If the lock cannot be acquired, then there is an
+                        // active write goroutine and so we should cancel the context.
+                        nc.writeCancel()
+                        return
+                }</span>
+                <span class="cov2" title="2">defer nc.writeMu.unlock()
+
+                // Prevents future writes from writing until the deadline is reset.
+                atomic.StoreInt64(&amp;nc.writeExpired, 1)</span>
+        })
+        <span class="cov6" title="8">if !nc.writeTimer.Stop() </span><span class="cov0" title="0">{
+                &lt;-nc.writeTimer.C
+        }</span>
+
+        <span class="cov6" title="8">nc.readTimer = time.AfterFunc(math.MaxInt64, func() </span><span class="cov2" title="2">{
+                if !nc.readMu.tryLock() </span><span class="cov0" title="0">{
+                        // If the lock cannot be acquired, then there is an
+                        // active read goroutine and so we should cancel the context.
+                        nc.readCancel()
+                        return
+                }</span>
+                <span class="cov2" title="2">defer nc.readMu.unlock()
+
+                // Prevents future reads from reading until the deadline is reset.
+                atomic.StoreInt64(&amp;nc.readExpired, 1)</span>
+        })
+        <span class="cov6" title="8">if !nc.readTimer.Stop() </span><span class="cov0" title="0">{
+                &lt;-nc.readTimer.C
+        }</span>
+
+        <span class="cov6" title="8">return nc</span>
+}
+
+type netConn struct {
+        c       *Conn
+        msgType MessageType
+
+        writeTimer   *time.Timer
+        writeMu      *mu
+        writeExpired int64
+        writeCtx     context.Context
+        writeCancel  context.CancelFunc
+
+        readTimer   *time.Timer
+        readMu      *mu
+        readExpired int64
+        readCtx     context.Context
+        readCancel  context.CancelFunc
+        readEOFed   bool
+        reader      io.Reader
+}
+
+var _ net.Conn = &amp;netConn{}
+
+func (nc *netConn) Close() error <span class="cov2" title="2">{
+        nc.writeTimer.Stop()
+        nc.writeCancel()
+        nc.readTimer.Stop()
+        nc.readCancel()
+        return nc.c.Close(StatusNormalClosure, "")
+}</span>
+
+func (nc *netConn) Write(p []byte) (int, error) <span class="cov3" title="3">{
+        nc.writeMu.forceLock()
+        defer nc.writeMu.unlock()
+
+        if atomic.LoadInt64(&amp;nc.writeExpired) == 1 </span><span class="cov0" title="0">{
+                return 0, fmt.Errorf("failed to write: %w", context.DeadlineExceeded)
+        }</span>
+
+        <span class="cov3" title="3">err := nc.c.Write(nc.writeCtx, nc.msgType, p)
+        if err != nil </span><span class="cov0" title="0">{
+                return 0, err
+        }</span>
+        <span class="cov3" title="3">return len(p), nil</span>
+}
+
+func (nc *netConn) Read(p []byte) (int, error) <span class="cov9" title="39">{
+        nc.readMu.forceLock()
+        defer nc.readMu.unlock()
+
+        for </span><span class="cov10" title="41">{
+                n, err := nc.read(p)
+                if err != nil </span><span class="cov4" title="5">{
+                        return n, err
+                }</span>
+                <span class="cov9" title="36">if n == 0 </span><span class="cov2" title="2">{
+                        continue</span>
+                }
+                <span class="cov9" title="34">return n, nil</span>
+        }
+}
+
+func (nc *netConn) read(p []byte) (int, error) <span class="cov10" title="41">{
+        if atomic.LoadInt64(&amp;nc.readExpired) == 1 </span><span class="cov0" title="0">{
+                return 0, fmt.Errorf("failed to read: %w", context.DeadlineExceeded)
+        }</span>
+
+        <span class="cov10" title="41">if nc.readEOFed </span><span class="cov2" title="2">{
+                return 0, io.EOF
+        }</span>
+
+        <span class="cov9" title="39">if nc.reader == nil </span><span class="cov4" title="5">{
+                typ, r, err := nc.c.Reader(nc.readCtx)
+                if err != nil </span><span class="cov2" title="2">{
+                        switch CloseStatus(err) </span>{
+                        case StatusNormalClosure, StatusGoingAway:<span class="cov2" title="2">
+                                nc.readEOFed = true
+                                return 0, io.EOF</span>
+                        }
+                        <span class="cov0" title="0">return 0, err</span>
+                }
+                <span class="cov3" title="3">if typ != nc.msgType </span><span class="cov1" title="1">{
+                        err := fmt.Errorf("unexpected frame type read (expected %v): %v", nc.msgType, typ)
+                        nc.c.Close(StatusUnsupportedData, err.Error())
+                        return 0, err
+                }</span>
+                <span class="cov2" title="2">nc.reader = r</span>
+        }
+
+        <span class="cov9" title="36">n, err := nc.reader.Read(p)
+        if err == io.EOF </span><span class="cov2" title="2">{
+                nc.reader = nil
+                err = nil
+        }</span>
+        <span class="cov9" title="36">return n, err</span>
+}
+
+type websocketAddr struct {
+}
+
+func (a websocketAddr) Network() string <span class="cov0" title="0">{
+        return "websocket"
+}</span>
+
+func (a websocketAddr) String() string <span class="cov0" title="0">{
+        return "websocket/unknown-addr"
+}</span>
+
+func (nc *netConn) SetDeadline(t time.Time) error <span class="cov4" title="4">{
+        nc.SetWriteDeadline(t)
+        nc.SetReadDeadline(t)
+        return nil
+}</span>
+
+func (nc *netConn) SetWriteDeadline(t time.Time) error <span class="cov4" title="4">{
+        atomic.StoreInt64(&amp;nc.writeExpired, 0)
+        if t.IsZero() </span><span class="cov1" title="1">{
+                nc.writeTimer.Stop()
+        }</span> else<span class="cov3" title="3"> {
+                dur := time.Until(t)
+                if dur &lt;= 0 </span><span class="cov2" title="2">{
+                        dur = 1
+                }</span>
+                <span class="cov3" title="3">nc.writeTimer.Reset(dur)</span>
+        }
+        <span class="cov4" title="4">return nil</span>
+}
+
+func (nc *netConn) SetReadDeadline(t time.Time) error <span class="cov4" title="4">{
+        atomic.StoreInt64(&amp;nc.readExpired, 0)
+        if t.IsZero() </span><span class="cov1" title="1">{
+                nc.readTimer.Stop()
+        }</span> else<span class="cov3" title="3"> {
+                dur := time.Until(t)
+                if dur &lt;= 0 </span><span class="cov2" title="2">{
+                        dur = 1
+                }</span>
+                <span class="cov3" title="3">nc.readTimer.Reset(dur)</span>
+        }
+        <span class="cov4" title="4">return nil</span>
+}
+</pre>
+		
+		<pre class="file" id="file12" style="display: none">//go:build !js
+// +build !js
+
+package websocket
+
+import "net"
+
+func (nc *netConn) RemoteAddr() net.Addr <span class="cov10" title="3">{
+        if unc, ok := nc.c.rwc.(net.Conn); ok </span><span class="cov10" title="3">{
+                return unc.RemoteAddr()
+        }</span>
+        <span class="cov0" title="0">return websocketAddr{}</span>
+}
+
+func (nc *netConn) LocalAddr() net.Addr <span class="cov1" title="1">{
+        if unc, ok := nc.c.rwc.(net.Conn); ok </span><span class="cov1" title="1">{
+                return unc.LocalAddr()
+        }</span>
+        <span class="cov0" title="0">return websocketAddr{}</span>
+}
+</pre>
+		
+		<pre class="file" id="file13" style="display: none">//go:build !js
+// +build !js
+
+package websocket
+
+import (
+        "bufio"
+        "context"
+        "errors"
+        "fmt"
+        "io"
+        "net"
+        "strings"
+        "time"
+
+        "nhooyr.io/websocket/internal/errd"
+        "nhooyr.io/websocket/internal/util"
+        "nhooyr.io/websocket/internal/xsync"
+)
+
+// Reader reads from the connection until there is a WebSocket
+// data message to be read. It will handle ping, pong and close frames as appropriate.
+//
+// It returns the type of the message and an io.Reader to read it.
+// The passed context will also bound the reader.
+// Ensure you read to EOF otherwise the connection will hang.
+//
+// Call CloseRead if you do not expect any data messages from the peer.
+//
+// Only one Reader may be open at a time.
+//
+// If you need a separate timeout on the Reader call and the Read itself,
+// use time.AfterFunc to cancel the context passed in.
+// See https://github.com/nhooyr/websocket/issues/87#issue-451703332
+// Most users should not need this.
+func (c *Conn) Reader(ctx context.Context) (MessageType, io.Reader, error) <span class="cov8" title="196144">{
+        return c.reader(ctx)
+}</span>
+
+// Read is a convenience method around Reader to read a single message
+// from the connection.
+func (c *Conn) Read(ctx context.Context) (MessageType, []byte, error) <span class="cov3" title="131">{
+        typ, r, err := c.Reader(ctx)
+        if err != nil </span><span class="cov1" title="1">{
+                return 0, nil, err
+        }</span>
+
+        <span class="cov3" title="130">b, err := io.ReadAll(r)
+        return typ, b, err</span>
+}
+
+// CloseRead starts a goroutine to read from the connection until it is closed
+// or a data message is received.
+//
+// Once CloseRead is called you cannot read any messages from the connection.
+// The returned context will be cancelled when the connection is closed.
+//
+// If a data message is received, the connection will be closed with StatusPolicyViolation.
+//
+// Call CloseRead when you do not expect to read any more messages.
+// Since it actively reads from the connection, it will ensure that ping, pong and close
+// frames are responded to. This means c.Ping and c.Close will still work as expected.
+func (c *Conn) CloseRead(ctx context.Context) context.Context <span class="cov3" title="133">{
+        ctx, cancel := context.WithCancel(ctx)
+
+        c.wg.Add(1)
+        go func() </span><span class="cov3" title="133">{
+                defer c.CloseNow()
+                defer c.wg.Done()
+                defer cancel()
+                _, _, err := c.Reader(ctx)
+                if err == nil </span><span class="cov0" title="0">{
+                        c.Close(StatusPolicyViolation, "unexpected data message")
+                }</span>
+        }()
+        <span class="cov3" title="133">return ctx</span>
+}
+
+// SetReadLimit sets the max number of bytes to read for a single message.
+// It applies to the Reader and Read methods.
+//
+// By default, the connection has a message read limit of 32768 bytes.
+//
+// When the limit is hit, the connection will be closed with StatusMessageTooBig.
+//
+// Set to -1 to disable.
+func (c *Conn) SetReadLimit(n int64) <span class="cov4" title="337">{
+        if n &gt;= 0 </span><span class="cov4" title="329">{
+                // We read one more byte than the limit in case
+                // there is a fin frame that needs to be read.
+                n++
+        }</span>
+
+        <span class="cov4" title="337">c.msgReader.limitReader.limit.Store(n)</span>
+}
+
+const defaultReadLimit = 32768
+
+func newMsgReader(c *Conn) *msgReader <span class="cov4" title="493">{
+        mr := &amp;msgReader{
+                c:   c,
+                fin: true,
+        }
+        mr.readFunc = mr.read
+
+        mr.limitReader = newLimitReader(c, mr.readFunc, defaultReadLimit+1)
+        return mr
+}</span>
+
+func (mr *msgReader) resetFlate() <span class="cov7" title="149387">{
+        if mr.flateContextTakeover() </span><span class="cov7" title="148055">{
+                if mr.dict == nil </span><span class="cov3" title="154">{
+                        mr.dict = &amp;slidingWindow{}
+                }</span>
+                <span class="cov7" title="148055">mr.dict.init(32768)</span>
+        }
+        <span class="cov7" title="149387">if mr.flateBufio == nil </span><span class="cov3" title="160">{
+                mr.flateBufio = getBufioReader(mr.readFunc)
+        }</span>
+
+        <span class="cov7" title="149387">if mr.flateContextTakeover() </span><span class="cov7" title="148055">{
+                mr.flateReader = getFlateReader(mr.flateBufio, mr.dict.buf)
+        }</span> else<span class="cov5" title="1332"> {
+                mr.flateReader = getFlateReader(mr.flateBufio, nil)
+        }</span>
+        <span class="cov7" title="149387">mr.limitReader.r = mr.flateReader
+        mr.flateTail.Reset(deflateMessageTail)</span>
+}
+
+func (mr *msgReader) putFlateReader() <span class="cov8" title="196179">{
+        if mr.flateReader != nil </span><span class="cov7" title="149387">{
+                putFlateReader(mr.flateReader)
+                mr.flateReader = nil
+        }</span>
+}
+
+func (mr *msgReader) close() <span class="cov4" title="493">{
+        mr.c.readMu.forceLock()
+        mr.putFlateReader()
+        if mr.dict != nil </span><span class="cov3" title="154">{
+                mr.dict.close()
+                mr.dict = nil
+        }</span>
+        <span class="cov4" title="493">if mr.flateBufio != nil </span><span class="cov3" title="160">{
+                putBufioReader(mr.flateBufio)
+        }</span>
+
+        <span class="cov4" title="493">if mr.c.client </span><span class="cov4" title="398">{
+                putBufioReader(mr.c.br)
+                mr.c.br = nil
+        }</span>
+}
+
+func (mr *msgReader) flateContextTakeover() bool <span class="cov8" title="736971">{
+        if mr.c.client </span><span class="cov8" title="726128">{
+                return !mr.c.copts.serverNoContextTakeover
+        }</span>
+        <span class="cov6" title="10843">return !mr.c.copts.clientNoContextTakeover</span>
+}
+
+func (c *Conn) readRSV1Illegal(h header) bool <span class="cov7" title="149391">{
+        // If compression is disabled, rsv1 is illegal.
+        if !c.flate() </span><span class="cov1" title="4">{
+                return true
+        }</span>
+        // rsv1 is only allowed on data frames beginning messages.
+        <span class="cov7" title="149387">if h.opcode != opText &amp;&amp; h.opcode != opBinary </span><span class="cov0" title="0">{
+                return true
+        }</span>
+        <span class="cov7" title="149387">return false</span>
+}
+
+func (c *Conn) readLoop(ctx context.Context) (header, error) <span class="cov9" title="2942252">{
+        for </span><span class="cov9" title="2943404">{
+                h, err := c.readFrameHeader(ctx)
+                if err != nil </span><span class="cov0" title="0">{
+                        return header{}, err
+                }</span>
+
+                <span class="cov9" title="2943404">if h.rsv1 &amp;&amp; c.readRSV1Illegal(h) || h.rsv2 || h.rsv3 </span><span class="cov2" title="7">{
+                        err := fmt.Errorf("received header with unexpected rsv bits set: %v:%v:%v", h.rsv1, h.rsv2, h.rsv3)
+                        c.writeError(StatusProtocolError, err)
+                        return header{}, err
+                }</span>
+
+                <span class="cov9" title="2943397">if !c.client &amp;&amp; !h.masked </span><span class="cov0" title="0">{
+                        return header{}, errors.New("received unmasked frame from client")
+                }</span>
+
+                <span class="cov9" title="2943397">switch h.opcode </span>{
+                case opClose, opPing, opPong:<span class="cov5" title="1609">
+                        err = c.handleControl(ctx, h)
+                        if err != nil </span><span class="cov4" title="457">{
+                                // Pass through CloseErrors when receiving a close frame.
+                                if h.opcode == opClose &amp;&amp; CloseStatus(err) != -1 </span><span class="cov4" title="440">{
+                                        return header{}, err
+                                }</span>
+                                <span class="cov2" title="17">return header{}, fmt.Errorf("failed to handle control frame %v: %w", h.opcode, err)</span>
+                        }
+                case opContinuation, opText, opBinary:<span class="cov9" title="2941778">
+                        return h, nil</span>
+                default:<span class="cov2" title="10">
+                        err := fmt.Errorf("received unknown opcode %v", h.opcode)
+                        c.writeError(StatusProtocolError, err)
+                        return header{}, err</span>
+                }
+        }
+}
+
+func (c *Conn) readFrameHeader(ctx context.Context) (header, error) <span class="cov9" title="2943404">{
+        select </span>{
+        case &lt;-c.closed:<span class="cov0" title="0">
+                return header{}, net.ErrClosed</span>
+        case c.readTimeout &lt;- ctx:<span class="cov9" title="2943404"></span>
+        }
+
+        <span class="cov9" title="2943404">h, err := readFrameHeader(c.br, c.readHeaderBuf[:])
+        if err != nil </span><span class="cov0" title="0">{
+                select </span>{
+                case &lt;-c.closed:<span class="cov0" title="0">
+                        return header{}, net.ErrClosed</span>
+                case &lt;-ctx.Done():<span class="cov0" title="0">
+                        return header{}, ctx.Err()</span>
+                default:<span class="cov0" title="0">
+                        c.close(err)
+                        return header{}, err</span>
+                }
+        }
+
+        <span class="cov9" title="2943404">select </span>{
+        case &lt;-c.closed:<span class="cov0" title="0">
+                return header{}, net.ErrClosed</span>
+        case c.readTimeout &lt;- context.Background():<span class="cov9" title="2943404"></span>
+        }
+
+        <span class="cov9" title="2943404">return h, nil</span>
+}
+
+func (c *Conn) readFramePayload(ctx context.Context, p []byte) (int, error) <span class="cov9" title="3105185">{
+        select </span>{
+        case &lt;-c.closed:<span class="cov0" title="0">
+                return 0, net.ErrClosed</span>
+        case c.readTimeout &lt;- ctx:<span class="cov9" title="3105185"></span>
+        }
+
+        <span class="cov9" title="3105185">n, err := io.ReadFull(c.br, p)
+        if err != nil </span><span class="cov0" title="0">{
+                select </span>{
+                case &lt;-c.closed:<span class="cov0" title="0">
+                        return n, net.ErrClosed</span>
+                case &lt;-ctx.Done():<span class="cov0" title="0">
+                        return n, ctx.Err()</span>
+                default:<span class="cov0" title="0">
+                        err = fmt.Errorf("failed to read frame payload: %w", err)
+                        c.close(err)
+                        return n, err</span>
+                }
+        }
+
+        <span class="cov9" title="3105185">select </span>{
+        case &lt;-c.closed:<span class="cov0" title="0">
+                return n, net.ErrClosed</span>
+        case c.readTimeout &lt;- context.Background():<span class="cov9" title="3105185"></span>
+        }
+
+        <span class="cov9" title="3105185">return n, err</span>
+}
+
+func (c *Conn) handleControl(ctx context.Context, h header) (err error) <span class="cov5" title="1609">{
+        if h.payloadLength &lt; 0 || h.payloadLength &gt; maxControlPayload </span><span class="cov1" title="2">{
+                err := fmt.Errorf("received control frame payload with invalid length: %d", h.payloadLength)
+                c.writeError(StatusProtocolError, err)
+                return err
+        }</span>
+
+        <span class="cov5" title="1607">if !h.fin </span><span class="cov1" title="2">{
+                err := errors.New("received fragmented control frame")
+                c.writeError(StatusProtocolError, err)
+                return err
+        }</span>
+
+        <span class="cov5" title="1605">ctx, cancel := context.WithTimeout(ctx, time.Second*5)
+        defer cancel()
+
+        b := c.readControlBuf[:h.payloadLength]
+        _, err = c.readFramePayload(ctx, b)
+        if err != nil </span><span class="cov0" title="0">{
+                return err
+        }</span>
+
+        <span class="cov5" title="1605">if h.masked </span><span class="cov4" title="649">{
+                mask(h.maskKey, b)
+        }</span>
+
+        <span class="cov5" title="1605">switch h.opcode </span>{
+        case opPing:<span class="cov4" title="592">
+                return c.writeControl(ctx, opPong, b)</span>
+        case opPong:<span class="cov4" title="561">
+                c.activePingsMu.Lock()
+                pong, ok := c.activePings[string(b)]
+                c.activePingsMu.Unlock()
+                if ok </span><span class="cov4" title="558">{
+                        select </span>{
+                        case pong &lt;- struct{}{}:<span class="cov4" title="558"></span>
+                        default:<span class="cov0" title="0"></span>
+                        }
+                }
+                <span class="cov4" title="561">return nil</span>
+        }
+
+        <span class="cov4" title="452">defer func() </span><span class="cov4" title="452">{
+                c.readCloseFrameErr = err
+        }</span>()
+
+        <span class="cov4" title="452">ce, err := parseClosePayload(b)
+        if err != nil </span><span class="cov2" title="12">{
+                err = fmt.Errorf("received invalid close payload: %w", err)
+                c.writeError(StatusProtocolError, err)
+                return err
+        }</span>
+
+        <span class="cov4" title="440">err = fmt.Errorf("received close frame: %w", ce)
+        c.setCloseErr(err)
+        c.writeClose(ce.Code, ce.Reason)
+        c.close(err)
+        return err</span>
+}
+
+func (c *Conn) reader(ctx context.Context) (_ MessageType, _ io.Reader, err error) <span class="cov8" title="196144">{
+        defer errd.Wrap(&amp;err, "failed to get reader")
+
+        err = c.readMu.lock(ctx)
+        if err != nil </span><span class="cov0" title="0">{
+                return 0, nil, err
+        }</span>
+        <span class="cov8" title="196144">defer c.readMu.unlock()
+
+        if !c.msgReader.fin </span><span class="cov0" title="0">{
+                err = errors.New("previous message not read to completion")
+                c.close(fmt.Errorf("failed to get reader: %w", err))
+                return 0, nil, err
+        }</span>
+
+        <span class="cov8" title="196144">h, err := c.readLoop(ctx)
+        if err != nil </span><span class="cov4" title="445">{
+                return 0, nil, err
+        }</span>
+
+        <span class="cov8" title="195699">if h.opcode == opContinuation </span><span class="cov2" title="9">{
+                err := errors.New("received continuation frame without text or binary frame")
+                c.writeError(StatusProtocolError, err)
+                return 0, nil, err
+        }</span>
+
+        <span class="cov8" title="195690">c.msgReader.reset(ctx, h)
+
+        return MessageType(h.opcode), c.msgReader, nil</span>
+}
+
+type msgReader struct {
+        c *Conn
+
+        ctx         context.Context
+        flate       bool
+        flateReader io.Reader
+        flateBufio  *bufio.Reader
+        flateTail   strings.Reader
+        limitReader *limitReader
+        dict        *slidingWindow
+
+        fin           bool
+        payloadLength int64
+        maskKey       uint32
+
+        // util.ReaderFunc(mr.Read) to avoid continuous allocations.
+        readFunc util.ReaderFunc
+}
+
+func (mr *msgReader) reset(ctx context.Context, h header) <span class="cov8" title="195690">{
+        mr.ctx = ctx
+        mr.flate = h.rsv1
+        mr.limitReader.reset(mr.readFunc)
+
+        if mr.flate </span><span class="cov7" title="149387">{
+                mr.resetFlate()
+        }</span>
+
+        <span class="cov8" title="195690">mr.setFrame(h)</span>
+}
+
+func (mr *msgReader) setFrame(h header) <span class="cov9" title="2941767">{
+        mr.fin = h.fin
+        mr.payloadLength = h.payloadLength
+        mr.maskKey = h.maskKey
+}</span>
+
+func (mr *msgReader) Read(p []byte) (n int, err error) <span class="cov8" title="707905">{
+        err = mr.c.readMu.lock(mr.ctx)
+        if err != nil </span><span class="cov0" title="0">{
+                return 0, fmt.Errorf("failed to read: %w", err)
+        }</span>
+        <span class="cov8" title="707905">defer mr.c.readMu.unlock()
+
+        n, err = mr.limitReader.Read(p)
+        if mr.flate &amp;&amp; mr.flateContextTakeover() </span><span class="cov8" title="435533">{
+                p = p[:n]
+                mr.dict.write(p)
+        }</span>
+        <span class="cov8" title="707905">if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) &amp;&amp; mr.fin &amp;&amp; mr.flate </span><span class="cov8" title="195686">{
+                mr.putFlateReader()
+                return n, io.EOF
+        }</span>
+        <span class="cov8" title="512219">if err != nil </span><span class="cov1" title="2">{
+                err = fmt.Errorf("failed to read: %w", err)
+                mr.c.close(err)
+        }</span>
+        <span class="cov8" title="512219">return n, err</span>
+}
+
+func (mr *msgReader) read(p []byte) (int, error) <span class="cov9" title="3448655">{
+        for </span><span class="cov10" title="6194732">{
+                if mr.payloadLength == 0 </span><span class="cov9" title="3091152">{
+                        if mr.fin </span><span class="cov8" title="345073">{
+                                if mr.flate </span><span class="cov8" title="298774">{
+                                        return mr.flateTail.Read(p)
+                                }</span>
+                                <span class="cov7" title="46299">return 0, io.EOF</span>
+                        }
+
+                        <span class="cov9" title="2746079">h, err := mr.c.readLoop(mr.ctx)
+                        if err != nil </span><span class="cov1" title="1">{
+                                return 0, err
+                        }</span>
+                        <span class="cov9" title="2746078">if h.opcode != opContinuation </span><span class="cov1" title="1">{
+                                err := errors.New("received new data message without finishing the previous message")
+                                mr.c.writeError(StatusProtocolError, err)
+                                return 0, err
+                        }</span>
+                        <span class="cov9" title="2746077">mr.setFrame(h)
+
+                        continue</span>
+                }
+
+                <span class="cov9" title="3103580">if int64(len(p)) &gt; mr.payloadLength </span><span class="cov9" title="2826165">{
+                        p = p[:mr.payloadLength]
+                }</span>
+
+                <span class="cov9" title="3103580">n, err := mr.c.readFramePayload(mr.ctx, p)
+                if err != nil </span><span class="cov0" title="0">{
+                        return n, err
+                }</span>
+
+                <span class="cov9" title="3103580">mr.payloadLength -= int64(n)
+
+                if !mr.c.client </span><span class="cov6" title="23324">{
+                        mr.maskKey = mask(mr.maskKey, p)
+                }</span>
+
+                <span class="cov9" title="3103580">return n, nil</span>
+        }
+}
+
+type limitReader struct {
+        c     *Conn
+        r     io.Reader
+        limit xsync.Int64
+        n     int64
+}
+
+func newLimitReader(c *Conn, r io.Reader, limit int64) *limitReader <span class="cov4" title="493">{
+        lr := &amp;limitReader{
+                c: c,
+        }
+        lr.limit.Store(limit)
+        lr.reset(r)
+        return lr
+}</span>
+
+func (lr *limitReader) reset(r io.Reader) <span class="cov8" title="196183">{
+        lr.n = lr.limit.Load()
+        lr.r = r
+}</span>
+
+func (lr *limitReader) Read(p []byte) (int, error) <span class="cov8" title="707905">{
+        if lr.n &lt; 0 </span><span class="cov3" title="36">{
+                return lr.r.Read(p)
+        }</span>
+
+        <span class="cov8" title="707869">if lr.n == 0 </span><span class="cov0" title="0">{
+                err := fmt.Errorf("read limited at %v bytes", lr.limit.Load())
+                lr.c.writeError(StatusMessageTooBig, err)
+                return 0, err
+        }</span>
+
+        <span class="cov8" title="707869">if int64(len(p)) &gt; lr.n </span><span class="cov0" title="0">{
+                p = p[:lr.n]
+        }</span>
+        <span class="cov8" title="707869">n, err := lr.r.Read(p)
+        lr.n -= int64(n)
+        if lr.n &lt; 0 </span><span class="cov0" title="0">{
+                lr.n = 0
+        }</span>
+        <span class="cov8" title="707869">return n, err</span>
+}
+</pre>
+		
+		<pre class="file" id="file14" style="display: none">//go:build !js
+// +build !js
+
+package websocket
+
+import (
+        "bufio"
+        "context"
+        "crypto/rand"
+        "encoding/binary"
+        "errors"
+        "fmt"
+        "io"
+        "net"
+        "time"
+
+        "compress/flate"
+
+        "nhooyr.io/websocket/internal/errd"
+        "nhooyr.io/websocket/internal/util"
+)
+
+// Writer returns a writer bounded by the context that will write
+// a WebSocket message of type dataType to the connection.
+//
+// You must close the writer once you have written the entire message.
+//
+// Only one writer can be open at a time, multiple calls will block until the previous writer
+// is closed.
+func (c *Conn) Writer(ctx context.Context, typ MessageType) (io.WriteCloser, error) <span class="cov7" title="175840">{
+        w, err := c.writer(ctx, typ)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("failed to get writer: %w", err)
+        }</span>
+        <span class="cov7" title="175840">return w, nil</span>
+}
+
+// Write writes a message to the connection.
+//
+// See the Writer method if you want to stream a message.
+//
+// If compression is disabled or the compression threshold is not met, then it
+// will write the message in a single frame.
+func (c *Conn) Write(ctx context.Context, typ MessageType, p []byte) error <span class="cov6" title="19851">{
+        _, err := c.write(ctx, typ, p)
+        if err != nil </span><span class="cov1" title="1">{
+                return fmt.Errorf("failed to write msg: %w", err)
+        }</span>
+        <span class="cov6" title="19850">return nil</span>
+}
+
+type msgWriter struct {
+        c *Conn
+
+        mu      *mu
+        writeMu *mu
+        closed  bool
+
+        ctx    context.Context
+        opcode opcode
+        flate  bool
+
+        trimWriter  *trimLastFourBytesWriter
+        flateWriter *flate.Writer
+}
+
+func newMsgWriter(c *Conn) *msgWriter <span class="cov4" title="493">{
+        mw := &amp;msgWriter{
+                c:       c,
+                mu:      newMu(c),
+                writeMu: newMu(c),
+        }
+        return mw
+}</span>
+
+func (mw *msgWriter) ensureFlate() <span class="cov7" title="187391">{
+        if mw.trimWriter == nil </span><span class="cov3" title="142">{
+                mw.trimWriter = &amp;trimLastFourBytesWriter{
+                        w: util.WriterFunc(mw.write),
+                }
+        }</span>
+
+        <span class="cov7" title="187391">if mw.flateWriter == nil </span><span class="cov6" title="31438">{
+                mw.flateWriter = getFlateWriter(mw.trimWriter)
+        }</span>
+        <span class="cov7" title="187391">mw.flate = true</span>
+}
+
+func (mw *msgWriter) flateContextTakeover() bool <span class="cov7" title="131543">{
+        if mw.c.client </span><span class="cov7" title="128844">{
+                return !mw.c.copts.clientNoContextTakeover
+        }</span>
+        <span class="cov5" title="2699">return !mw.c.copts.serverNoContextTakeover</span>
+}
+
+func (c *Conn) writer(ctx context.Context, typ MessageType) (io.WriteCloser, error) <span class="cov7" title="195691">{
+        err := c.msgWriter.reset(ctx, typ)
+        if err != nil </span><span class="cov1" title="1">{
+                return nil, err
+        }</span>
+        <span class="cov7" title="195690">return c.msgWriter, nil</span>
+}
+
+func (c *Conn) write(ctx context.Context, typ MessageType, p []byte) (int, error) <span class="cov6" title="19851">{
+        mw, err := c.writer(ctx, typ)
+        if err != nil </span><span class="cov1" title="1">{
+                return 0, err
+        }</span>
+
+        <span class="cov6" title="19850">if !c.flate() </span><span class="cov6" title="17155">{
+                defer c.msgWriter.mu.unlock()
+                return c.writeFrame(ctx, true, false, c.msgWriter.opcode, p)
+        }</span>
+
+        <span class="cov5" title="2695">n, err := mw.Write(p)
+        if err != nil </span><span class="cov0" title="0">{
+                return n, err
+        }</span>
+
+        <span class="cov5" title="2695">err = mw.Close()
+        return n, err</span>
+}
+
+func (mw *msgWriter) reset(ctx context.Context, typ MessageType) error <span class="cov7" title="195691">{
+        err := mw.mu.lock(ctx)
+        if err != nil </span><span class="cov1" title="1">{
+                return err
+        }</span>
+
+        <span class="cov7" title="195690">mw.ctx = ctx
+        mw.opcode = opcode(typ)
+        mw.flate = false
+        mw.closed = false
+
+        mw.trimWriter.reset()
+
+        return nil</span>
+}
+
+func (mw *msgWriter) putFlateWriter() <span class="cov6" title="31825">{
+        if mw.flateWriter != nil </span><span class="cov6" title="31438">{
+                putFlateWriter(mw.flateWriter)
+                mw.flateWriter = nil
+        }</span>
+}
+
+// Write writes the given bytes to the WebSocket connection.
+func (mw *msgWriter) Write(p []byte) (_ int, err error) <span class="cov8" title="493784">{
+        err = mw.writeMu.lock(mw.ctx)
+        if err != nil </span><span class="cov0" title="0">{
+                return 0, fmt.Errorf("failed to write: %w", err)
+        }</span>
+        <span class="cov8" title="493784">defer mw.writeMu.unlock()
+
+        if mw.closed </span><span class="cov0" title="0">{
+                return 0, errors.New("cannot use closed writer")
+        }</span>
+
+        <span class="cov8" title="493784">defer func() </span><span class="cov8" title="493784">{
+                if err != nil </span><span class="cov0" title="0">{
+                        err = fmt.Errorf("failed to write: %w", err)
+                        mw.c.close(err)
+                }</span>
+        }()
+
+        <span class="cov8" title="493784">if mw.c.flate() </span><span class="cov7" title="288691">{
+                // Only enables flate if the length crosses the
+                // threshold on the first frame
+                if mw.opcode != opContinuation &amp;&amp; len(p) &gt;= mw.c.flateThreshold </span><span class="cov7" title="187391">{
+                        mw.ensureFlate()
+                }</span>
+        }
+
+        <span class="cov8" title="493784">if mw.flate </span><span class="cov7" title="270688">{
+                return mw.flateWriter.Write(p)
+        }</span>
+
+        <span class="cov7" title="223096">return mw.write(p)</span>
+}
+
+func (mw *msgWriter) write(p []byte) (int, error) <span class="cov9" title="14741209">{
+        n, err := mw.c.writeFrame(mw.ctx, false, mw.flate, mw.opcode, p)
+        if err != nil </span><span class="cov0" title="0">{
+                return n, fmt.Errorf("failed to write data frame: %w", err)
+        }</span>
+        <span class="cov9" title="14741209">mw.opcode = opContinuation
+        return n, nil</span>
+}
+
+// Close flushes the frame to the connection.
+func (mw *msgWriter) Close() (err error) <span class="cov7" title="178532">{
+        defer errd.Wrap(&amp;err, "failed to close writer")
+
+        err = mw.writeMu.lock(mw.ctx)
+        if err != nil </span><span class="cov0" title="0">{
+                return err
+        }</span>
+        <span class="cov7" title="178532">defer mw.writeMu.unlock()
+
+        if mw.closed </span><span class="cov0" title="0">{
+                return errors.New("writer already closed")
+        }</span>
+        <span class="cov7" title="178532">mw.closed = true
+
+        if mw.flate </span><span class="cov7" title="131387">{
+                err = mw.flateWriter.Flush()
+                if err != nil </span><span class="cov0" title="0">{
+                        return fmt.Errorf("failed to flush flate: %w", err)
+                }</span>
+        }
+
+        <span class="cov7" title="178532">_, err = mw.c.writeFrame(mw.ctx, true, mw.flate, mw.opcode, nil)
+        if err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("failed to write fin frame: %w", err)
+        }</span>
+
+        <span class="cov7" title="178532">if mw.flate &amp;&amp; !mw.flateContextTakeover() </span><span class="cov6" title="31332">{
+                mw.putFlateWriter()
+        }</span>
+        <span class="cov7" title="178532">mw.mu.unlock()
+        return nil</span>
+}
+
+func (mw *msgWriter) close() <span class="cov4" title="493">{
+        if mw.c.client </span><span class="cov4" title="398">{
+                mw.c.writeFrameMu.forceLock()
+                putBufioWriter(mw.c.bw)
+        }</span>
+
+        <span class="cov4" title="493">mw.writeMu.forceLock()
+        mw.putFlateWriter()</span>
+}
+
+func (c *Conn) writeControl(ctx context.Context, opcode opcode, p []byte) error <span class="cov5" title="1698">{
+        ctx, cancel := context.WithTimeout(ctx, time.Second*5)
+        defer cancel()
+
+        _, err := c.writeFrame(ctx, true, false, opcode, p)
+        if err != nil </span><span class="cov3" title="65">{
+                return fmt.Errorf("failed to write control frame %v: %w", opcode, err)
+        }</span>
+        <span class="cov5" title="1633">return nil</span>
+}
+
+// frame handles all writes to the connection.
+func (c *Conn) writeFrame(ctx context.Context, fin bool, flate bool, opcode opcode, p []byte) (_ int, err error) <span class="cov9" title="14938594">{
+        err = c.writeFrameMu.lock(ctx)
+        if err != nil </span><span class="cov2" title="13">{
+                return 0, err
+        }</span>
+
+        // If the state says a close has already been written, we wait until
+        // the connection is closed and return that error.
+        //
+        // However, if the frame being written is a close, that means its the close from
+        // the state being set so we let it go through.
+        <span class="cov9" title="14938581">c.closeMu.Lock()
+        wroteClose := c.wroteClose
+        c.closeMu.Unlock()
+        if wroteClose &amp;&amp; opcode != opClose </span><span class="cov3" title="51">{
+                c.writeFrameMu.unlock()
+                select </span>{
+                case &lt;-ctx.Done():<span class="cov0" title="0">
+                        return 0, ctx.Err()</span>
+                case &lt;-c.closed:<span class="cov3" title="51">
+                        return 0, net.ErrClosed</span>
+                }
+        }
+        <span class="cov9" title="14938530">defer c.writeFrameMu.unlock()
+
+        select </span>{
+        case &lt;-c.closed:<span class="cov0" title="0">
+                return 0, net.ErrClosed</span>
+        case c.writeTimeout &lt;- ctx:<span class="cov9" title="14938530"></span>
+        }
+
+        <span class="cov9" title="14938530">defer func() </span><span class="cov9" title="14938530">{
+                if err != nil </span><span class="cov1" title="1">{
+                        select </span>{
+                        case &lt;-c.closed:<span class="cov1" title="1">
+                                err = net.ErrClosed</span>
+                        case &lt;-ctx.Done():<span class="cov0" title="0">
+                                err = ctx.Err()</span>
+                        default:<span class="cov0" title="0"></span>
+                        }
+                        <span class="cov1" title="1">c.close(err)
+                        err = fmt.Errorf("failed to write frame: %w", err)</span>
+                }
+        }()
+
+        <span class="cov9" title="14938530">c.writeHeader.fin = fin
+        c.writeHeader.opcode = opcode
+        c.writeHeader.payloadLength = int64(len(p))
+
+        if c.client </span><span class="cov9" title="14899378">{
+                c.writeHeader.masked = true
+                _, err = io.ReadFull(rand.Reader, c.writeHeaderBuf[:4])
+                if err != nil </span><span class="cov0" title="0">{
+                        return 0, fmt.Errorf("failed to generate masking key: %w", err)
+                }</span>
+                <span class="cov9" title="14899378">c.writeHeader.maskKey = binary.LittleEndian.Uint32(c.writeHeaderBuf[:])</span>
+        }
+
+        <span class="cov9" title="14938530">c.writeHeader.rsv1 = false
+        if flate &amp;&amp; (opcode == opText || opcode == opBinary) </span><span class="cov7" title="131387">{
+                c.writeHeader.rsv1 = true
+        }</span>
+
+        <span class="cov9" title="14938530">err = writeFrameHeader(c.writeHeader, c.bw, c.writeHeaderBuf[:])
+        if err != nil </span><span class="cov0" title="0">{
+                return 0, err
+        }</span>
+
+        <span class="cov9" title="14938530">n, err := c.writeFramePayload(p)
+        if err != nil </span><span class="cov0" title="0">{
+                return n, err
+        }</span>
+
+        <span class="cov9" title="14938530">if c.writeHeader.fin </span><span class="cov7" title="197321">{
+                err = c.bw.Flush()
+                if err != nil </span><span class="cov1" title="1">{
+                        return n, fmt.Errorf("failed to flush: %w", err)
+                }</span>
+        }
+
+        <span class="cov9" title="14938529">select </span>{
+        case &lt;-c.closed:<span class="cov1" title="1">
+                if opcode == opClose </span><span class="cov1" title="1">{
+                        return n, nil
+                }</span>
+                <span class="cov0" title="0">return n, net.ErrClosed</span>
+        case c.writeTimeout &lt;- context.Background():<span class="cov9" title="14938528"></span>
+        }
+
+        <span class="cov9" title="14938528">return n, nil</span>
+}
+
+func (c *Conn) writeFramePayload(p []byte) (n int, err error) <span class="cov9" title="14938530">{
+        defer errd.Wrap(&amp;err, "failed to write frame payload")
+
+        if !c.writeHeader.masked </span><span class="cov6" title="39152">{
+                return c.bw.Write(p)
+        }</span>
+
+        <span class="cov9" title="14899378">maskKey := c.writeHeader.maskKey
+        for len(p) &gt; 0 </span><span class="cov10" title="15265363">{
+                // If the buffer is full, we need to flush.
+                if c.bw.Available() == 0 </span><span class="cov8" title="529398">{
+                        err = c.bw.Flush()
+                        if err != nil </span><span class="cov0" title="0">{
+                                return n, err
+                        }</span>
+                }
+
+                // Start of next write in the buffer.
+                <span class="cov10" title="15265363">i := c.bw.Buffered()
+
+                j := len(p)
+                if j &gt; c.bw.Available() </span><span class="cov8" title="529212">{
+                        j = c.bw.Available()
+                }</span>
+
+                <span class="cov10" title="15265363">_, err := c.bw.Write(p[:j])
+                if err != nil </span><span class="cov0" title="0">{
+                        return n, err
+                }</span>
+
+                <span class="cov10" title="15265363">maskKey = mask(maskKey, c.writeBuf[i:c.bw.Buffered()])
+
+                p = p[j:]
+                n += j</span>
+        }
+
+        <span class="cov9" title="14899378">return n, nil</span>
+}
+
+// extractBufioWriterBuf grabs the []byte backing a *bufio.Writer
+// and returns it.
+func extractBufioWriterBuf(bw *bufio.Writer, w io.Writer) []byte <span class="cov4" title="398">{
+        var writeBuf []byte
+        bw.Reset(util.WriterFunc(func(p2 []byte) (int, error) </span><span class="cov4" title="398">{
+                writeBuf = p2[:cap(p2)]
+                return len(p2), nil
+        }</span>))
+
+        <span class="cov4" title="398">bw.WriteByte(0)
+        bw.Flush()
+
+        bw.Reset(w)
+
+        return writeBuf</span>
+}
+
+func (c *Conn) writeError(code StatusCode, err error) <span class="cov3" title="43">{
+        c.setCloseErr(err)
+        c.writeClose(code, err.Error())
+        c.close(nil)
+}</span>
+</pre>
+		
+		<pre class="file" id="file15" style="display: none">// Package wsjson provides helpers for reading and writing JSON messages.
+package wsjson // import "nhooyr.io/websocket/wsjson"
+
+import (
+        "context"
+        "encoding/json"
+        "fmt"
+
+        "nhooyr.io/websocket"
+        "nhooyr.io/websocket/internal/bpool"
+        "nhooyr.io/websocket/internal/errd"
+        "nhooyr.io/websocket/internal/util"
+)
+
+// Read reads a JSON message from c into v.
+// It will reuse buffers in between calls to avoid allocations.
+func Read(ctx context.Context, c *websocket.Conn, v interface{}) error <span class="cov8" title="3">{
+        return read(ctx, c, v)
+}</span>
+
+func read(ctx context.Context, c *websocket.Conn, v interface{}) (err error) <span class="cov8" title="3">{
+        defer errd.Wrap(&amp;err, "failed to read JSON message")
+
+        _, r, err := c.Reader(ctx)
+        if err != nil </span><span class="cov0" title="0">{
+                return err
+        }</span>
+
+        <span class="cov8" title="3">b := bpool.Get()
+        defer bpool.Put(b)
+
+        _, err = b.ReadFrom(r)
+        if err != nil </span><span class="cov0" title="0">{
+                return err
+        }</span>
+
+        <span class="cov8" title="3">err = json.Unmarshal(b.Bytes(), v)
+        if err != nil </span><span class="cov0" title="0">{
+                c.Close(websocket.StatusInvalidFramePayloadData, "failed to unmarshal JSON")
+                return fmt.Errorf("failed to unmarshal JSON: %w", err)
+        }</span>
+
+        <span class="cov8" title="3">return nil</span>
+}
+
+// Write writes the JSON message v to c.
+// It will reuse buffers in between calls to avoid allocations.
+func Write(ctx context.Context, c *websocket.Conn, v interface{}) error <span class="cov10" title="4">{
+        return write(ctx, c, v)
+}</span>
+
+func write(ctx context.Context, c *websocket.Conn, v interface{}) (err error) <span class="cov10" title="4">{
+        defer errd.Wrap(&amp;err, "failed to write JSON message")
+
+        // json.Marshal cannot reuse buffers between calls as it has to return
+        // a copy of the byte slice but Encoder does as it directly writes to w.
+        err = json.NewEncoder(util.WriterFunc(func(p []byte) (int, error) </span><span class="cov10" title="4">{
+                err := c.Write(ctx, websocket.MessageText, p)
+                if err != nil </span><span class="cov0" title="0">{
+                        return 0, err
+                }</span>
+                <span class="cov10" title="4">return len(p), nil</span>
+        })).Encode(v)
+        <span class="cov10" title="4">if err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("failed to marshal JSON: %w", err)
+        }</span>
+        <span class="cov10" title="4">return nil</span>
+}
+</pre>
+		
+		</div>
+	</body>
+	<script>
+	(function() {
+		var files = document.getElementById('files');
+		var visible;
+		files.addEventListener('change', onChange, false);
+		function select(part) {
+			if (visible)
+				visible.style.display = 'none';
+			visible = document.getElementById(part);
+			if (!visible)
+				return;
+			files.value = part;
+			visible.style.display = 'block';
+			location.hash = part;
+		}
+		function onChange() {
+			select(files.value);
+			window.scrollTo(0, 0);
+		}
+		if (location.hash != "") {
+			select(location.hash.substr(1));
+		}
+		if (!visible) {
+			select("file0");
+		}
+	})();
+	</script>
+</html>
