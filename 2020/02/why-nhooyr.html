@@ -1,10 +1,9 @@
 <link rel="stylesheet" href="../../style.css">
+<a href=".">up</a>
 
-<a href="..">up</a>
-<h1>Time To Give Back</h1>
+<h1>Why nhooyr?</h1>
 <ul>
-    <li><span>published:</span> <span>Feb 02, 2020</span></li>
-    <li><span>revised:</span> <span>Dec 20, 2021</span></li>
+    <li><span>published:</span> <span>Feb 09, 2020</span></li>
 </ul>
 
 <p>
@@ -18,9 +17,9 @@
 </p>
 <p>
     I was reading a
-    <Link href="https://en.wikipedia.org/wiki/The_Code_Book">book on cryptography</Link> at the time
+    <a href="https://en.wikipedia.org/wiki/The_Code_Book">book on cryptography</a> at the time
     and had learnt about the
-    <Link href="https://en.wikipedia.org/wiki/rot13">ROT13</Link> cipher. It's a
+    <a href="https://en.wikipedia.org/wiki/rot13">ROT13</a> cipher. It's a
     monoalphabetic cipher where each letter maps to the 13th letter after it in the alphabet. It has the elegant
     property that encryption and decryption are identical operations.
 </p>
@@ -28,8 +27,30 @@
     I applied it to aubble and out came nhooyr. I ran a google search on nhooyr. For the first time ever I saw a
     google search with zero results.
 </p>
-<p>That’s when I knew it was mine.</p>
-<form onSubmit={rot13Submit}>
-    <Input.Text value={rot13Input} onChange={onROT13Change} css={css` overflow: visible; word-break: normal; `} />
-    <Input.Submit value="ROT13" css={css` margin-left: 10px; `} />
+<p>That&apos;s when I knew it was mine.</p>
+
+<form id="rot13_form">
+    <input type="text" id="rot13_input" value="aubble" />
+    <button type="submit">ROT13</button>
 </form>
+
+<script>
+    document.getElementById("rot13_form").addEventListener("submit", (ev) => {
+        ev.preventDefault();
+        const rot13Input = document.getElementById("rot13_input").value
+        let cipherText = ""
+        for (let char of rot13Input) {
+            let cc = char.charCodeAt(0)
+            if (65 <= cc && cc <= 90) {
+                cc = ((cc - 65 + 13) % 26) + 65
+                char = String.fromCharCode(cc)
+            } else if (97 <= cc && cc <= 122) {
+                cc = ((cc - 97 + 13) % 26) + 97
+                char = String.fromCharCode(cc)
+            }
+
+            cipherText += char
+        }
+        document.getElementById("rot13_input").value = cipherText
+    });
+</script>
