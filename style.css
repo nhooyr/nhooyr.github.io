@@ -6,6 +6,10 @@ h1:first-child {
     margin-top: 0;
 }
 
+h1:first-of-type:not(h1:first-child) {
+    margin-top: 0.5rem;
+}
+
 h1 {
     margin: 0;
     margin-top: 1.5rem;
@@ -22,13 +26,13 @@ ul {
     display: table;
     padding: 0;
     margin: 0;
-}
 
-li {
-    display: table-row;
-}
+    li {
+        display: table-row;
+    }
 
-li>span:first-child {
-    display: table-cell;
-    padding-right: 0.5rem;
+    li>span:first-child {
+        display: table-cell;
+        padding-right: 0.5rem;
+    }
 }
