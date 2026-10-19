@@ -1,4 +1,4 @@
-http://localhost:8080
+:8080
 try_files {path} {path}.html
 file_server
 handle_errors {
