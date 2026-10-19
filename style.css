@@ -4,7 +4,7 @@ body {
 }
 
 h1:first-child {
-    margin-top: 0;
+    margin-top: -0.25ch;
 }
 
 h1:first-of-type:not(h1:first-child) {
