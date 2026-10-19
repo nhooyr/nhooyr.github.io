@@ -1,4 +1,4 @@
-:8080
+:80
 try_files {path} {path}.html
 file_server
 handle_errors {
