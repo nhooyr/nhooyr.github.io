@@ -33,6 +33,7 @@ ul {
     }
 
     li>span:first-child {
+		min-width: max-content;
         display: table-cell;
         padding-right: 0.5rem;
     }
