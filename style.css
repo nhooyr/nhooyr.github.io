@@ -38,3 +38,9 @@ ul {
     padding-right: 0.5rem;
   }
 }
+
+#links {
+  display: grid;
+  grid-template-columns: repeat(2, max-content);
+  gap: 0.5rem 4ch;
+}
