@@ -1,7 +1,3 @@
-document.getElementById("current_path").innerText = window.location.pathname;
-if (document.title == "") {
-  document.title = window.location.host;
-  if (window.location.pathname != "/") {
-    document.title += window.location.pathname;
-  }
-}
+const { host, pathname } = window.location;
+document.getElementById("current_path").textContent = pathname;
+document.title ||= host + (pathname === "/" ? "" : pathname);
