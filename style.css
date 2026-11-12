@@ -3,6 +3,11 @@ body {
   max-width: 80ch;
 }
 
+nav a + a::before {
+  content: "\a0\a0";
+  display: inline-block;
+}
+
 h1:first-child {
   margin-top: -0.25ch;
 }
