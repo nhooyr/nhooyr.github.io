@@ -49,3 +49,8 @@ ul {
   grid-template-columns: repeat(2, max-content);
   gap: 0.5rem 4ch;
 }
+
+#rot13_form input,
+#rot13_form button {
+  font-size: inherit;
+}
