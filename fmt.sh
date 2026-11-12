@@ -6,7 +6,7 @@ if [ "${GITHUB_ACTIONS-}" ]; then
 	sudo apt-get install --yes shfmt
 fi
 
-npx prettier -w --print-width=110 .
+npx prettier -w --print-width=110 --no-semi .
 shfmt -s -w .
 
 if [ "${CI-}" ]; then
