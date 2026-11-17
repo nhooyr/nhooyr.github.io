@@ -43,7 +43,7 @@ ul {
     padding-right: 0.5rem;
   }
 
-  li.spaced > span {
+  li.space\% > span {
     display: table-cell;
     padding-bottom: 1ch;
   }
