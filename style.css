@@ -13,15 +13,16 @@ nav a + a::before {
 }
 
 h1 {
-  margin: 1rem 0 1rem;
-}
-
-main:first-child > h1:first-child {
-  margin-top: 0;
+  margin: 1rem 0;
 }
 
 h2 {
-  margin: 1rem 0 1rem;
+  margin: 1rem 0 0.5rem 0;
+}
+
+main:first-child > h1:first-child,
+article > h1:first-child {
+  margin: 1rem 0 0.5rem 0;
 }
 
 h1 + p {
@@ -46,8 +47,8 @@ dl {
     padding-right: 1ch;
   }
 
-  .space\% > * {
-    padding-bottom: 1ch;
+  .space-after > * {
+    padding-bottom: 1rem;
   }
 
   ul {
