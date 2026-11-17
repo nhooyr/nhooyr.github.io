@@ -42,6 +42,11 @@ ul {
     display: table-cell;
     padding-right: 0.5rem;
   }
+
+  li.spaced > span {
+    display: table-cell;
+    padding-bottom: 1ch;
+  }
 }
 
 #links {
