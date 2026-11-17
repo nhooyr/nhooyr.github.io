@@ -8,74 +8,89 @@
   </head>
 
   <body>
-    <nav><a href="../../">home</a><a href=".">up</a></nav>
+    <header>
+      <nav aria-label="Page"><a href="../../">home</a><a href=".">up</a></nav>
+    </header>
 
-    <h1>Why nhooyr?</h1>
-    <dl>
-      <div>
-        <dt>published:</dt>
-        <dd><time datetime="2020-02-09">Feb 09, 2020</time></dd>
-      </div>
-    </dl>
+    <main>
+      <article>
+        <h1>Why nhooyr?</h1>
+        <dl>
+          <div>
+            <dt>published:</dt>
+            <dd><time datetime="2020-02-09">Feb 09, 2020</time></dd>
+          </div>
+        </dl>
 
-    <p>
-      Back in middle school, I went through quite a few online usernames but never settled on one. Whenever
-      I'd sign up for a new service, my current username happened to be taken and I would conjure up a new
-      one.
-    </p>
-    <p>
-      First it was anmol444, then armyofminions and then aubble and many more in between. Around grade 9, I
-      remember trying to sign up for twitter with aubble but it happened to be taken. I became frustrated at
-      having different usernames for different services and decided to find a name that wasn't taken.
-    </p>
-    <p>
-      I was reading a <a href="https://en.wikipedia.org/wiki/The_Code_Book">book on cryptography</a> at the
-      time and had learnt about the <a href="https://en.wikipedia.org/wiki/rot13">ROT13</a> cipher. It's a
-      monoalphabetic cipher where each letter maps to the 13th letter after it in the alphabet. It has the
-      elegant property that encryption and decryption are identical operations.
-    </p>
-    <p>
-      I applied it to aubble and out came nhooyr. I ran a google search on nhooyr. For the first time ever I
-      saw a google search with zero results.
-    </p>
-    <p>That's when I knew it was mine.</p>
+        <p>
+          Back in middle school, I went through quite a few online usernames but never settled on one.
+          Whenever I'd sign up for a new service, my current username happened to be taken and I would conjure
+          up a new one.
+        </p>
+        <p>
+          First it was anmol444, then armyofminions and then aubble and many more in between. Around grade 9,
+          I remember trying to sign up for twitter with aubble but it happened to be taken. I became
+          frustrated at having different usernames for different services and decided to find a name that
+          wasn't taken.
+        </p>
+        <p>
+          I was reading a <a href="https://en.wikipedia.org/wiki/The_Code_Book">book on cryptography</a> at
+          the time and had learnt about the <a href="https://en.wikipedia.org/wiki/rot13">ROT13</a> cipher.
+          It's a monoalphabetic cipher where each letter maps to the 13th letter after it in the alphabet. It
+          has the elegant property that encryption and decryption are identical operations.
+        </p>
+        <p>
+          I applied it to aubble and out came nhooyr. I ran a google search on nhooyr. For the first time ever
+          I saw a google search with zero results.
+        </p>
+        <p>That's when I knew it was mine.</p>
 
-    <form id="rot13_form">
-      <input type="text" id="rot13_input" aria-label="Text to encode with ROT13" value="aubble" />
-      <button type="submit">ROT13</button>
-      <em>
-        <a
-          href="https://github.com/search?q=repo%3Anhooyr%2Fnhooyr.github.io+document.getElementById%28%22rot13_form%22%29&type=code">
-          code
-        </a>
-      </em>
-    </form>
+        <form id="rot13_form">
+          <input type="text" id="rot13_input" aria-label="Text to encode with ROT13" value="aubble" />
+          <button type="submit">ROT13</button>
+          <em>
+            <a
+              href="https://github.com/search?q=repo%3Anhooyr%2Fnhooyr.github.io+document.getElementById%28%22rot13_form%22%29&type=code">
+              code
+            </a>
+          </em>
+        </form>
 
-    <p>
-      <em>(<time datetime="2026-11-11">Nov 11, 2026</time>)</em>: Unfortunately with my
-      <a href="../../2026/11/rebirth">name changes</a>, nhooyr only survives at
-      <a href="https://github.com/nhooyr">github.com/nhooyr</a>.
-    </p>
+        <p>
+          <em>(<time datetime="2026-11-11">Nov 11, 2026</time>)</em>: Unfortunately with my
+          <a href="../../2026/11/rebirth">name changes</a>, nhooyr only survives at
+          <a href="https://github.com/nhooyr">github.com/nhooyr</a>.
+        </p>
 
-    <script>
-      document.getElementById("rot13_form").addEventListener("submit", (ev) => {
-        ev.preventDefault()
-        const rot13Input = document.getElementById("rot13_input").value
-        let cipherText = ""
-        for (let char of rot13Input) {
-          let cc = char.charCodeAt(0)
-          if (65 <= cc && cc <= 90) {
-            cc = ((cc - 65 + 13) % 26) + 65
-            char = String.fromCharCode(cc)
-          } else if (97 <= cc && cc <= 122) {
-            cc = ((cc - 97 + 13) % 26) + 97
-            char = String.fromCharCode(cc)
-          }
+        <script>
+          document.getElementById("rot13_form").addEventListener("submit", (ev) => {
+            ev.preventDefault()
+            const rot13Input = document.getElementById("rot13_input").value
+            let cipherText = ""
+            for (let char of rot13Input) {
+              let cc = char.charCodeAt(0)
+              if (65 <= cc && cc <= 90) {
+                cc = ((cc - 65 + 13) % 26) + 65
+                char = String.fromCharCode(cc)
+              } else if (97 <= cc && cc <= 122) {
+                cc = ((cc - 97 + 13) % 26) + 97
+                char = String.fromCharCode(cc)
+              }
 
-          cipherText += char
-        }
-        document.getElementById("rot13_input").value = cipherText
-      })
-    </script>
+              cipherText += char
+            }
+            document.getElementById("rot13_input").value = cipherText
+          })
+        </script>
+      </article>
+    </main>
+
+    <footer>
+      <nav>
+        <a href="https://github.com/nhooyr/nhooyr.github.io/blob/main/2020/02/why-nhooyr.html"
+          ><em>source</em></a
+        >
+      </nav>
+    </footer>
   </body>
 </html>
