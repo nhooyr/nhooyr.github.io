@@ -92,3 +92,10 @@ ul.links-grid {
 #rot13_form button {
   font-size: inherit;
 }
+
+/* Fix iOS PWA nav blur. */
+@media (display-mode: standalone) {
+  body {
+    padding-top: 24px;
+  }
+}
