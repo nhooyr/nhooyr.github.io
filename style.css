@@ -21,26 +21,34 @@ h2 {
   margin: 1.5rem 0 0.5rem 0;
 }
 
-ul.kvtable, ul.links-grid, ul.links-grid ul {
-  list-style: none;
+dl {
   display: table;
-  padding: 0;
   margin: 0;
 
-  li {
+  > div {
     display: table-row;
   }
 
-  li > span:first-child {
-    min-width: max-content;
+  dt,
+  dd {
     display: table-cell;
+    margin: 0;
+  }
+
+  dt {
     padding-right: 1ch;
   }
 
-  li.space\% > span {
-    display: table-cell;
+  .space\% > * {
     padding-bottom: 1ch;
   }
+}
+
+ul.links-grid,
+ul.links-grid ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 ul.links-grid {
