@@ -18,6 +18,10 @@ article > h1:first-child {
   margin: 1rem 0 0.5rem 0;
 }
 
+main:first-child > h1:first-child {
+  margin-top: 0;
+}
+
 footer {
   margin-top: 1rem;
 }
