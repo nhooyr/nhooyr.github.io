@@ -12,19 +12,13 @@ h1:first-child {
   margin-top: -0.25ch;
 }
 
-h1:first-of-type:not(h1:first-child) {
+h1:first-of-type:not(:first-child) {
   margin-top: 0.5rem;
 }
 
-h1 {
-  margin: 0;
-  margin-top: 1.5rem;
-  margin-bottom: 0.5rem;
-
-  a {
-    text-decoration: none;
-    color: black;
-  }
+h1,
+h2 {
+  margin: 1.5rem 0 0.5rem 0;
 }
 
 ul {
@@ -40,7 +34,7 @@ ul {
   li > span:first-child {
     min-width: max-content;
     display: table-cell;
-    padding-right: 0.5rem;
+    padding-right: 1ch;
   }
 
   li.space\% > span {
@@ -49,7 +43,7 @@ ul {
   }
 }
 
-#links {
+.links-grid {
   display: grid;
   grid-template-columns: repeat(4, max-content);
   gap: 0.5rem 4ch;
