@@ -93,9 +93,11 @@ ul.links-grid {
   font-size: inherit;
 }
 
-/* Fix iOS PWA nav blur. */
-@media (display-mode: standalone) {
-  body {
-    padding-top: 24px;
+/* Keep content below the iOS standalone top-edge blur. */
+@supports (-webkit-touch-callout: none) {
+  @media (display-mode: standalone) {
+    body {
+      padding-top: 32px;
+    }
   }
 }
