@@ -21,7 +21,7 @@ h2 {
   margin: 1.5rem 0 0.5rem 0;
 }
 
-ul {
+ul.kvtable, ul.links-grid, ul.links-grid ul {
   list-style: none;
   display: table;
   padding: 0;
@@ -43,7 +43,7 @@ ul {
   }
 }
 
-.links-grid {
+ul.links-grid {
   display: grid;
   grid-template-columns: repeat(4, max-content);
   gap: 0.5rem 4ch;
