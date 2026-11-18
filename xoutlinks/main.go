@@ -809,10 +809,36 @@ type retryLater struct {
 
 func (e *retryLater) Error() string { return e.entry.errorText() }
 
+func errorLine(base string, entry Entry) string {
+	status, message := entry.Status, entry.errorText()
+	if message == "" {
+		return ""
+	}
+	if status == "replay_pending" {
+		status = "replay unavailable"
+		message = strings.TrimPrefix(message, "verify archive replay "+entry.ArchiveURL+": ")
+	}
+	return fmt.Sprintf("%s: %s: %s\n", base, status, message)
+}
+
+func (r *runner) printError(base string, entry Entry) {
+	if line := errorLine(base, entry); line != "" {
+		r.printf("%s", line)
+	}
+}
+
+func (r *runner) printRetry(base string, entry Entry, until time.Time) {
+	prefix := "retry at"
+	if entry.Status == "replay_pending" {
+		prefix = "waiting for replay; retry at"
+	}
+	r.printf("%s%s: %s %s\n", errorLine(base, entry), base, prefix, until.Local().Format("2006-01-02 15:04:05 MST"))
+}
+
 func (r *runner) attempt(ctx context.Context, item work) error {
 	if r.retryInterval > 0 && item.entry.Status != "needs_auth" && item.entry.Status != "blocked" {
 		if until, err := time.Parse(time.RFC3339Nano, item.entry.RetryAt); err == nil && until.After(r.currentTime()) {
-			r.printf("%s: retry at %s\n", item.base, until.Local().Format("2006-01-02 15:04:05 MST"))
+			r.printRetry(item.base, item.entry, until)
 			return &retryLater{entry: item.entry, delay: until.Sub(r.currentTime())}
 		}
 	}
@@ -820,26 +846,38 @@ func (r *runner) attempt(ctx context.Context, item work) error {
 	err := r.process(ctx, item)
 	entry, found := r.ledger.record(item.base)
 	if r.retryInterval <= 0 || ctx.Err() != nil || !found || (entry.Error == "" && entry.ErrorMsg == "") || entry.Status == "blocked" || entry.Status == "needs_auth" {
+		if ctx.Err() == nil && found {
+			r.printError(item.base, entry)
+		}
 		return err
 	}
 	until := r.currentTime().Add(r.retryInterval)
 	entry.RetryAt = until.Format(time.RFC3339Nano)
 	if saveErr := r.store(item, entry); saveErr != nil {
+		r.printError(item.base, entry)
 		return errors.Join(err, saveErr)
 	}
-	r.printf("%s: retry at %s\n", item.base, until.Local().Format("2006-01-02 15:04:05 MST"))
+	r.printRetry(item.base, entry, until)
 	return &retryLater{entry: entry, delay: r.retryInterval}
 }
 
 func parallel(ctx context.Context, items []work, count int, fn func(context.Context, work) error) error {
 	failures := make(chan error, len(items))
+	report := func(item work, err error) {
+		if err != nil {
+			failures <- fmt.Errorf("%s: %w", item.base, err)
+		}
+	}
 	slots := make(chan struct{}, count)
 	var workers sync.WaitGroup
 launch:
-	for _, item := range items {
+	for i, item := range items {
 		select {
 		case slots <- struct{}{}:
 		case <-ctx.Done():
+			for _, queued := range items[i:] {
+				report(queued, ctx.Err())
+			}
 			break launch
 		}
 		workers.Add(1)
@@ -848,25 +886,28 @@ launch:
 			for {
 				if ctx.Err() != nil {
 					<-slots
+					report(item, ctx.Err())
 					return
 				}
 				err := fn(ctx, item)
 				<-slots
 				var retry *retryLater
 				if !errors.As(err, &retry) {
-					if err != nil {
-						failures <- err
+					if err == nil {
+						err = ctx.Err()
 					}
+					report(item, err)
 					return
 				}
 				if err := wait(ctx, retry.delay); err != nil {
-					failures <- err
+					report(item, err)
 					return
 				}
 				item.entry = retry.entry
 				select {
 				case slots <- struct{}{}:
 				case <-ctx.Done():
+					report(item, ctx.Err())
 					return
 				}
 			}
@@ -889,7 +930,7 @@ launch:
 		// The runner persists the first rate limit it finds in the joined error.
 		collected[0], collected[longestIndex] = collected[longestIndex], collected[0]
 	}
-	return errors.Join(append(collected, ctx.Err())...)
+	return errors.Join(collected...)
 }
 
 func (r *runner) recover(ctx context.Context, item work, fallback Entry) error {
@@ -959,6 +1000,7 @@ func (r *runner) finishJob(ctx context.Context, base string, aliases []string, e
 		case "success":
 			archive := "https://web.archive.org/web/" + result.Timestamp + "/" + result.OriginalURL
 			if archivePattern.MatchString(archive) && r.acceptsArchive(entry, archive) {
+				r.printf("%s: captured\n", base)
 				return r.replay(ctx, work{base, aliases, entry}, Entry{ArchiveURL: archive})
 			}
 			entry = transition(entry, "failed")
@@ -1007,11 +1049,7 @@ func (r *runner) process(ctx context.Context, item work) (err error) {
 				entry.Error, entry.ErrorMsg = "", err.Error()
 				err = errors.Join(err, r.store(item, entry))
 			}
-			err = fmt.Errorf("%s: %w", item.base, err)
 			return
-		}
-		if entry, _ := r.ledger.record(item.base); entry.errorText() != "" {
-			r.printf("%s: %s: %s\n", item.base, entry.Status, entry.errorText())
 		}
 	}()
 	entry := item.entry
