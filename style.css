@@ -46,6 +46,7 @@ dl {
 
   dt {
     padding-right: 1ch;
+    white-space: nowrap;
   }
 
   .space-after > * {
