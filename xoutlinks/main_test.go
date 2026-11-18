@@ -519,7 +519,8 @@ func TestCanceledRetryWaitPersistsAndResumesItsDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	resumed := &fakeArchiveService{}
-	r = runner{ledger: loaded, client: resumed, concurrency: 1, retryInterval: time.Millisecond}
+	var output strings.Builder
+	r = runner{ledger: loaded, client: resumed, concurrency: 1, retryInterval: time.Millisecond, output: &output}
 	ctx, cancel = context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	if err := r.run(ctx, []string{bad}); !errors.Is(err, context.DeadlineExceeded) {
@@ -527,6 +528,130 @@ func TestCanceledRetryWaitPersistsAndResumesItsDeadline(t *testing.T) {
 	}
 	if resumed.counts() != [3]int{} || testReadEntries(t, path)[bad] != saved {
 		t.Fatal("Resuming repeated a request before its saved deadline")
+	}
+	until, err := time.Parse(time.RFC3339Nano, saved.RetryAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := bad + ": failed: error:no-request: Try later.\n" + bad + ": retry at " + until.Local().Format("2006-01-02 15:04:05 MST") + "\n"
+	if got := output.String(); got != want {
+		t.Fatalf("Saved error did not precede the retry message: %q; want %q", got, want)
+	}
+}
+
+type chunkWriter struct{ writes []string }
+
+func (w *chunkWriter) Write(p []byte) (int, error) {
+	w.writes = append(w.writes, string(p))
+	return len(p), nil
+}
+
+func TestConcurrentErrorsAndRetriesStayTogether(t *testing.T) {
+	for _, saved := range []bool{false, true} {
+		t.Run(fmt.Sprint(saved), func(t *testing.T) {
+			ledger, _ := newTestLedger(t)
+			var output chunkWriter
+			client := &fakeArchiveService{verifyFn: func(context.Context, string) error { return errReplayNotFound }}
+			r := runner{ledger: ledger, client: client, output: &output, retryInterval: time.Minute, now: fixedTestTime}
+			const count = 16
+			var workers sync.WaitGroup
+			for i := range count {
+				base := fmt.Sprintf("https://example.com/%d", i)
+				entry := Entry{Status: "replay_pending", ArchiveURL: testSnapshot(base)}
+				if saved {
+					entry.ErrorMsg = "verify archive replay " + entry.ArchiveURL + ": " + errReplayNotFound.Error()
+					entry.RetryAt = testNow.Add(time.Hour).Format(time.RFC3339)
+				}
+				if err := ledger.put(base, []string{base}, entry); err != nil {
+					t.Fatal(err)
+				}
+				workers.Add(1)
+				go func() {
+					defer workers.Done()
+					var retry *retryLater
+					if err := r.attempt(context.Background(), work{base, []string{base}, entry}); !errors.As(err, &retry) {
+						t.Errorf("Expected a scheduled retry: %v", err)
+					}
+				}()
+			}
+			workers.Wait()
+			pairs := make(map[string]bool)
+			for _, chunk := range output.writes {
+				base, _, found := strings.Cut(chunk, ": replay unavailable: ")
+				if !found {
+					continue
+				}
+				lines := strings.Split(strings.TrimSuffix(chunk, "\n"), "\n")
+				if len(lines) != 2 || !strings.HasPrefix(lines[1], base+": waiting for replay; retry at ") {
+					t.Fatalf("Error and retry were not emitted together: %q", chunk)
+				}
+				if pairs[base] {
+					t.Fatalf("Error was printed more than once: %s", base)
+				}
+				pairs[base] = true
+			}
+			if len(pairs) != count {
+				t.Fatalf("Expected %d error/retry pairs, got %d", count, len(pairs))
+			}
+		})
+	}
+}
+
+func TestCancellationReportsEachURLOnce(t *testing.T) {
+	for _, mode := range []string{"before start", "active and queued", "retry waits"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			items := []work{{base: "https://example.com/a"}, {base: "https://example.com/b"}, {base: "https://example.com/c"}}
+			started := make(chan struct{}, len(items))
+			if mode == "before start" {
+				cancel()
+			}
+			done := make(chan error, 1)
+			go func() {
+				done <- parallel(ctx, items, 1, func(ctx context.Context, _ work) error {
+					started <- struct{}{}
+					if mode == "retry waits" {
+						return &retryLater{delay: time.Hour}
+					}
+					<-ctx.Done()
+					return ctx.Err()
+				})
+			}()
+			count := 1
+			if mode == "retry waits" {
+				count = len(items)
+			} else if mode == "before start" {
+				count = 0
+			}
+			for range count {
+				select {
+				case <-started:
+				case <-time.After(3 * time.Second):
+					t.Fatal("Workers did not reach the cancellation point")
+				}
+			}
+			cancel()
+			var err error
+			select {
+			case err = <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("Cancellation did not stop the workers")
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Cancellation was not preserved: %v", err)
+			}
+			lines := strings.Split(err.Error(), "\n")
+			if len(lines) != len(items) {
+				t.Fatalf("Expected one cancellation per URL: %q", lines)
+			}
+			for _, item := range items {
+				want := item.base + ": " + context.Canceled.Error()
+				if count := strings.Count("\n"+err.Error()+"\n", "\n"+want+"\n"); count != 1 {
+					t.Errorf("Expected one %q, got %d: %v", want, count, err)
+				}
+			}
+		})
 	}
 }
 
