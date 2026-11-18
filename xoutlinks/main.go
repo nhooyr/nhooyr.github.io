@@ -42,9 +42,9 @@ const databaseVersion = 1
 const blockedURLError = "error:blocked-url"
 
 type database struct {
-	Version    int              `json:"version"`
-	RetryAfter string           `json:"retry_after,omitempty"`
-	Entries    map[string]Entry `json:"entries"`
+	Version int              `json:"version"`
+	RetryAt string           `json:"retry_at,omitempty"`
+	Entries map[string]Entry `json:"entries"`
 }
 
 type Entry struct {
@@ -54,7 +54,18 @@ type Entry struct {
 	RefreshStartedAt string `json:"refresh_started_at,omitempty"`
 	JobID            string `json:"job_id,omitempty"`
 	Error            string `json:"error,omitempty"`
-	RetryAfter       string `json:"retry_after,omitempty"` // Read only to migrate old per-URL cooldowns.
+	ErrorMsg         string `json:"error_msg,omitempty"`
+	RetryAt          string `json:"retry_at,omitempty"`
+}
+
+func (e Entry) errorText() string {
+	if e.Error == "" {
+		return e.ErrorMsg
+	}
+	if e.ErrorMsg == "" || e.ErrorMsg == e.Error {
+		return e.Error
+	}
+	return e.Error + ": " + e.ErrorMsg
 }
 
 type Ledger struct {
@@ -196,10 +207,10 @@ func loadLedgerAt(path string, now time.Time) (*Ledger, error) {
 			return nil, fmt.Errorf("unsupported archive database version %d", stored.Version)
 		}
 		l.data = stored.Entries
-		if stored.RetryAfter != "" {
-			l.cooldown, err = time.Parse(time.RFC3339Nano, stored.RetryAfter)
+		if stored.RetryAt != "" {
+			l.cooldown, err = time.Parse(time.RFC3339Nano, stored.RetryAt)
 			if err != nil {
-				return nil, fmt.Errorf("invalid global retry_after in %s", path)
+				return nil, fmt.Errorf("invalid global retry_at in %s", path)
 			}
 		}
 	} else if err := json.Unmarshal(content, &l.data); err != nil || l.data == nil {
@@ -207,10 +218,13 @@ func loadLedgerAt(path string, now time.Time) (*Ledger, error) {
 	}
 	rewrite := !versioned
 	for raw, entry := range l.data {
+		if normalized := normalizeFailure(raw, entry); normalized != entry {
+			entry, rewrite = normalized, true
+		}
 		if entry.Status == "" || (entry.Status == "archived" && !archivePattern.MatchString(entry.ArchiveURL)) {
 			return nil, fmt.Errorf("invalid archive ledger entry: %s", raw)
 		}
-		for _, timestamp := range []string{entry.ExpiresAt, entry.RefreshStartedAt} {
+		for _, timestamp := range []string{entry.ExpiresAt, entry.RefreshStartedAt, entry.RetryAt} {
 			if timestamp != "" {
 				if _, err := time.Parse(time.RFC3339, timestamp); err != nil {
 					return nil, fmt.Errorf("invalid archive timestamp for %s", raw)
@@ -222,18 +236,14 @@ func loadLedgerAt(path string, now time.Time) (*Ledger, error) {
 		if !versioned && entry.ArchiveURL != "" && entry.ExpiresAt == "" {
 			entry.ExpiresAt = expiryAfterSixMonths(now).Format(time.RFC3339)
 		}
-		if entry.RetryAfter != "" {
-			if until, err := time.Parse(time.RFC3339Nano, entry.RetryAfter); err == nil && until.After(l.cooldown) {
-				l.cooldown = until
-			}
-			entry.RetryAfter = ""
+		if entry.Status == "archived" && (entry.Error != "" || entry.ErrorMsg != "" || entry.RetryAt != "") {
+			entry.Error, entry.ErrorMsg, entry.RetryAt = "", "", ""
 			rewrite = true
-		}
-		if entry.Status == "archived" && entry.Error != "" {
-			entry.Error = ""
+		} else if entry.permanentFailure() && (entry.Status != "blocked" || entry.JobID != "" || entry.RetryAt != "") {
+			entry.Status, entry.JobID, entry.RetryAt = "blocked", "", ""
 			rewrite = true
-		} else if entry.Error == blockedURLError && entry.Status != "blocked" {
-			entry.Status, entry.JobID = "blocked", ""
+		} else if entry.Status == "blocked" && entry.notFound() && !entry.permanentFailure() {
+			entry.Status = "failed"
 			rewrite = true
 		}
 		l.data[raw] = entry
@@ -263,7 +273,8 @@ func entryExpired(entry Entry, now time.Time) bool {
 }
 
 func transition(entry Entry, status string) Entry {
-	entry.Status, entry.JobID, entry.Error = status, "", ""
+	entry.Status, entry.JobID, entry.Error, entry.ErrorMsg = status, "", "", ""
+	entry.RetryAt = ""
 	return entry
 }
 
@@ -295,11 +306,11 @@ func (l *Ledger) record(base string) (Entry, bool) {
 func (l *Ledger) put(base string, aliases []string, entry Entry) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	entry.RetryAfter = ""
+	entry = normalizeFailure(base, entry)
 	if entry.Status == "archived" {
-		entry.Error = ""
-	} else if entry.Error == blockedURLError {
-		entry.Status, entry.JobID = "blocked", ""
+		entry.Error, entry.ErrorMsg, entry.RetryAt = "", "", ""
+	} else if entry.permanentFailure() {
+		entry.Status, entry.JobID, entry.RetryAt = "blocked", "", ""
 	}
 	var updated map[string]Entry
 	for raw := range l.data {
@@ -327,11 +338,11 @@ func (l *Ledger) put(base string, aliases []string, entry Entry) error {
 
 // write commits a replacement while the caller holds l.mu.
 func (l *Ledger) write(updated map[string]Entry, cooldown time.Time) error {
-	var retryAfter string
+	var retryAt string
 	if !cooldown.IsZero() {
-		retryAfter = cooldown.UTC().Format(time.RFC3339Nano)
+		retryAt = cooldown.UTC().Format(time.RFC3339Nano)
 	}
-	if err := writeJSON(l.path, database{Version: databaseVersion, RetryAfter: retryAfter, Entries: updated}); err != nil {
+	if err := writeJSON(l.path, database{Version: databaseVersion, RetryAt: retryAt, Entries: updated}); err != nil {
 		return err
 	}
 	l.data, l.cooldown = updated, cooldown
@@ -370,7 +381,7 @@ func writeJSON(path string, value any) error {
 	return nil
 }
 
-func (l *Ledger) retryAfter() time.Time {
+func (l *Ledger) retryAt() time.Time {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.cooldown
@@ -419,14 +430,12 @@ type capture struct {
 	Message       string `json:"message"`
 }
 
-func (c capture) reason() string {
-	if c.StatusExt != "" {
-		return c.StatusExt
+func (c capture) failure(entry Entry) Entry {
+	entry.Error, entry.ErrorMsg = c.StatusExt, c.Message
+	if entry.Error == "" && entry.ErrorMsg == "" {
+		entry.ErrorMsg = "unexpected Wayback response."
 	}
-	if c.Message != "" {
-		return c.Message
-	}
-	return "unexpected Wayback response."
+	return entry
 }
 
 func backpressure(c capture) bool {
@@ -732,13 +741,14 @@ type work struct {
 }
 
 type runner struct {
-	ledger       *Ledger
-	client       archiveService
-	concurrency  int
-	pollInterval time.Duration
-	output       io.Writer
-	outputMu     sync.Mutex
-	now          func() time.Time
+	ledger        *Ledger
+	client        archiveService
+	concurrency   int
+	pollInterval  time.Duration
+	retryInterval time.Duration
+	output        io.Writer
+	outputMu      sync.Mutex
+	now           func() time.Time
 }
 
 func (r *runner) currentTime() time.Time {
@@ -782,21 +792,72 @@ func (r *runner) printRateLimit(until time.Time) {
 	r.printf("wayback rate limit; waiting until %s.\n", until.Local().Format("2006-01-02 15:04:05 MST"))
 }
 
+type retryLater struct {
+	entry Entry
+	delay time.Duration
+}
+
+func (e *retryLater) Error() string { return e.entry.errorText() }
+
+func (r *runner) attempt(ctx context.Context, item work) error {
+	if r.retryInterval > 0 && item.entry.Status != "needs_auth" && item.entry.Status != "blocked" {
+		if until, err := time.Parse(time.RFC3339Nano, item.entry.RetryAt); err == nil && until.After(r.currentTime()) {
+			r.printf("%s: retry at %s\n", item.base, until.Local().Format("2006-01-02 15:04:05 MST"))
+			return &retryLater{entry: item.entry, delay: until.Sub(r.currentTime())}
+		}
+	}
+	item.entry.RetryAt = ""
+	err := r.process(ctx, item)
+	entry, found := r.ledger.record(item.base)
+	if r.retryInterval <= 0 || ctx.Err() != nil || !found || (entry.Error == "" && entry.ErrorMsg == "") || entry.Status == "blocked" || entry.Status == "needs_auth" {
+		return err
+	}
+	until := r.currentTime().Add(r.retryInterval)
+	entry.RetryAt = until.Format(time.RFC3339Nano)
+	if saveErr := r.store(item, entry); saveErr != nil {
+		return errors.Join(err, saveErr)
+	}
+	r.printf("%s: retry at %s\n", item.base, until.Local().Format("2006-01-02 15:04:05 MST"))
+	return &retryLater{entry: entry, delay: r.retryInterval}
+}
+
 func parallel(ctx context.Context, items []work, count int, fn func(context.Context, work) error) error {
 	failures := make(chan error, len(items))
-	var next atomic.Int64
+	slots := make(chan struct{}, count)
 	var workers sync.WaitGroup
-	for i := 0; i < count; i++ {
+launch:
+	for _, item := range items {
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			break launch
+		}
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
 			for {
-				i := int(next.Add(1)) - 1
-				if i >= len(items) || ctx.Err() != nil {
+				if ctx.Err() != nil {
+					<-slots
 					return
 				}
-				if err := fn(ctx, items[i]); err != nil {
+				err := fn(ctx, item)
+				<-slots
+				var retry *retryLater
+				if !errors.As(err, &retry) {
+					if err != nil {
+						failures <- err
+					}
+					return
+				}
+				if err := wait(ctx, retry.delay); err != nil {
 					failures <- err
+					return
+				}
+				item.entry = retry.entry
+				select {
+				case slots <- struct{}{}:
+				case <-ctx.Done():
+					return
 				}
 			}
 		}()
@@ -822,12 +883,20 @@ func parallel(ctx context.Context, items []work, count int, fn func(context.Cont
 }
 
 func (r *runner) recover(ctx context.Context, item work, fallback Entry) error {
-	if fallback.Error == blockedURLError {
+	fallback = normalizeFailure(item.base, fallback)
+	if fallback.permanentFailure() {
 		return r.store(item, fallback)
 	}
 	archive, err := r.client.available(ctx, item.base)
 	if err != nil {
-		return err
+		if ctx.Err() != nil {
+			return err
+		}
+		if fallback.ErrorMsg != "" {
+			fallback.ErrorMsg += "; "
+		}
+		fallback.ErrorMsg += "archive lookup failed: " + err.Error()
+		return r.store(item, fallback)
 	}
 	if archive != "" && r.acceptsArchive(item.entry, archive) {
 		fallback = r.archivedEntry(archive)
@@ -836,22 +905,13 @@ func (r *runner) recover(ctx context.Context, item work, fallback Entry) error {
 }
 
 func (r *runner) finishJob(ctx context.Context, base string, aliases []string, entry Entry) error {
-	r.printf("%s: saving\n", base)
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		result, err := r.client.status(ctx, entry.JobID)
 		if err != nil {
-			var auth *authenticationError
-			if errors.As(err, &auth) {
-				return r.fail(work{base, aliases, entry}, "needs_auth", err)
-			}
-			if fatalServiceError(err) {
-				return err
-			}
-			entry.Status, entry.Error = "uncertain", "job status unavailable; no capture found."
-			return r.recover(ctx, work{base, aliases, entry}, entry)
+			return r.fail(work{base, aliases, entry}, "pending", err)
 		}
 		if result.OriginalJobID != "" && result.OriginalJobID != entry.JobID {
 			entry = transition(entry, "pending")
@@ -862,7 +922,7 @@ func (r *runner) finishJob(ctx context.Context, base string, aliases []string, e
 			continue
 		}
 		if backpressure(result) {
-			return &serviceUnavailable{message: "wayback paused captures: " + result.reason() + ". Rerun later."}
+			return r.store(work{base, aliases, entry}, result.failure(entry))
 		}
 		switch result.Status {
 		case "success":
@@ -871,11 +931,10 @@ func (r *runner) finishJob(ctx context.Context, base string, aliases []string, e
 				return r.ledger.put(base, aliases, r.archivedEntry(archive))
 			}
 			entry = transition(entry, "failed")
-			entry.Error = "wayback returned an old or invalid snapshot instead of refreshing it."
+			entry.ErrorMsg = "wayback returned an old or invalid snapshot instead of refreshing it."
 			return r.ledger.put(base, aliases, entry)
 		case "error":
-			fallback := transition(entry, "failed")
-			fallback.Error = result.reason()
+			fallback := result.failure(transition(entry, "failed"))
 			return r.recover(ctx, work{base, aliases, entry}, fallback)
 		case "pending":
 			if err := wait(ctx, r.pollInterval); err != nil {
@@ -883,7 +942,8 @@ func (r *runner) finishJob(ctx context.Context, base string, aliases []string, e
 			}
 			continue
 		}
-		entry.Status, entry.Error = "uncertain", "unexpected capture response."
+		entry = result.failure(entry)
+		entry.Status = "uncertain"
 		return r.ledger.put(base, aliases, entry)
 	}
 }
@@ -901,7 +961,7 @@ func (r *runner) fail(item work, status string, err error) error {
 		status = "needs_auth"
 	}
 	entry := item.entry
-	entry.Status, entry.Error = status, err.Error()
+	entry.Status, entry.Error, entry.ErrorMsg = status, "", err.Error()
 	return r.store(item, entry)
 }
 
@@ -913,14 +973,14 @@ func (r *runner) process(ctx context.Context, item work) (err error) {
 				if !found {
 					entry.Status = "failed"
 				}
-				entry.Error = err.Error()
+				entry.Error, entry.ErrorMsg = "", err.Error()
 				err = errors.Join(err, r.store(item, entry))
 			}
 			err = fmt.Errorf("%s: %w", item.base, err)
 			return
 		}
-		if entry, _ := r.ledger.record(item.base); entry.Error != "" {
-			r.printf("%s: %s: %s\n", item.base, entry.Status, entry.Error)
+		if entry, _ := r.ledger.record(item.base); entry.errorText() != "" {
+			r.printf("%s: %s: %s\n", item.base, entry.Status, entry.errorText())
 		}
 	}()
 	entry := item.entry
@@ -937,7 +997,7 @@ func (r *runner) process(ctx context.Context, item work) (err error) {
 		entry.RefreshStartedAt = r.currentTime().Format(time.RFC3339)
 	case "needs_auth":
 		if entry.JobID != "" {
-			entry.Status, entry.Error = "pending", ""
+			entry.Status, entry.Error, entry.ErrorMsg = "pending", "", ""
 		} else {
 			entry = transition(entry, "ready")
 			if entry.ArchiveURL != "" {
@@ -983,15 +1043,16 @@ func (r *runner) process(ctx context.Context, item work) (err error) {
 			return r.fail(item, "uncertain", err)
 		}
 		if backpressure(result) {
-			return &serviceUnavailable{message: "wayback paused captures: " + result.reason() + ". Rerun later."}
+			return r.store(item, result.failure(transition(item.entry, "failed")))
 		}
 		if result.JobID == "" {
-			entry = transition(item.entry, "failed")
-			entry.Error = result.reason()
+			entry = result.failure(transition(item.entry, "failed"))
 			return r.recover(ctx, item, entry)
 		}
 		entry = transition(item.entry, "pending")
 		entry.JobID = result.JobID
+	} else {
+		r.printf("%s: saving\n", item.base)
 	}
 	if err := r.store(item, entry); err != nil {
 		return err
@@ -1000,7 +1061,7 @@ func (r *runner) process(ctx context.Context, item work) (err error) {
 		return err
 	}
 	entry, _ = r.ledger.record(item.base)
-	if entry.Error == "" {
+	if entry.errorText() == "" {
 		r.printf("%s: %s\n", item.base, entry.Status)
 	}
 	return nil
@@ -1051,7 +1112,7 @@ func (r *runner) run(ctx context.Context, urls []string) (runError error) {
 		}
 		defer func() { client.onRateLimit = previous }()
 	}
-	if retryAt := r.ledger.retryAfter(); retryAt.After(r.currentTime()) {
+	if retryAt := r.ledger.retryAt(); retryAt.After(r.currentTime()) {
 		r.printRateLimit(retryAt)
 		if err := wait(ctx, retryAt.Sub(r.currentTime())); err != nil {
 			return err
@@ -1068,7 +1129,7 @@ func (r *runner) run(ctx context.Context, urls []string) (runError error) {
 	if count <= 0 {
 		count = 3
 	}
-	runError = parallel(ctx, items, count, r.process)
+	runError = parallel(ctx, items, count, r.attempt)
 	if ctx.Err() != nil {
 		return runError
 	}
@@ -1103,6 +1164,7 @@ func main() {
 	}
 	root := flag.String("root", defaultRoot, "blog repository directory")
 	concurrency := flag.Int("concurrency", 3, "maximum simultaneous capture jobs")
+	retryInterval := flag.Duration("retry-interval", 4*time.Minute, "delay before retrying failed captures")
 	credentials := flag.String("credentials", "", "private JSON file containing access_key and secret_key")
 	explain := flag.String("explain", "", "explain whether a URL is excluded without making archive requests")
 	flag.Parse()
@@ -1116,6 +1178,10 @@ func main() {
 	}
 	if *concurrency < 1 {
 		fmt.Fprintln(os.Stderr, "--concurrency must be positive")
+		os.Exit(1)
+	}
+	if *retryInterval <= 0 {
+		fmt.Fprintln(os.Stderr, "--retry-interval must be positive")
 		os.Exit(1)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -1142,7 +1208,7 @@ func main() {
 		if err != nil {
 			return err
 		}
-		r := runner{ledger: ledger, client: client, concurrency: *concurrency, pollInterval: 10 * time.Second, output: os.Stdout}
+		r := runner{ledger: ledger, client: client, concurrency: *concurrency, pollInterval: 10 * time.Second, retryInterval: *retryInterval, output: os.Stdout}
 		return r.run(ctx, urls)
 	}()
 	if err != nil {
