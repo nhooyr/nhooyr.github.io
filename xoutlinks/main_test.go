@@ -804,7 +804,7 @@ func TestHTTPRateLimitWaitsThenRetries(t *testing.T) {
 	}
 }
 
-func TestPollingExhaustionPreservesPendingJobAndStopsNewSaves(t *testing.T) {
+func TestPendingJobContinuesPollingUntilFinished(t *testing.T) {
 	ledger, path := newTestLedger(t)
 	pendingURL, newURL := "https://example.com/pending", "https://example.com/new"
 	entry := Entry{Status: "pending", JobID: "still-running"}
@@ -814,21 +814,70 @@ func TestPollingExhaustionPreservesPendingJobAndStopsNewSaves(t *testing.T) {
 	if err := ledger.put(newURL, []string{newURL}, Entry{Status: "ready"}); err != nil {
 		t.Fatal(err)
 	}
+	polls := 0
+	client := &fakeArchiveService{statusFn: func(_ context.Context, job string) (capture, error) {
+		if job == entry.JobID {
+			polls++
+			if polls <= 100 {
+				return capture{Status: "pending"}, nil
+			}
+			return capture{Status: "success", Timestamp: testTimestamp, OriginalURL: pendingURL}, nil
+		}
+		return capture{Status: "success", Timestamp: testTimestamp, OriginalURL: newURL}, nil
+	}}
+	r := runner{ledger: ledger, client: client, now: fixedTestTime, concurrency: 1}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := r.run(ctx, []string{pendingURL, newURL}); err != nil {
+		t.Fatal(err)
+	}
+	if got := client.counts(); got != [3]int{0, 1, 102} || polls != 101 {
+		t.Fatalf("Polling stopped early or resubmitted the pending job: %v, %d polls", got, polls)
+	}
+	for _, raw := range []string{pendingURL, newURL} {
+		if stored := testReadEntries(t, path)[raw]; stored.Status != "archived" || stored.ArchiveURL != testSnapshot(raw) {
+			t.Fatalf("Capture did not finish: %+v", stored)
+		}
+	}
+}
+
+func TestPendingJobWaitCanBeCanceledAndResumed(t *testing.T) {
+	ledger, path := newTestLedger(t)
+	pendingURL, newURL := "https://example.com/pending", "https://example.com/new"
+	entry := Entry{Status: "pending", JobID: "job:" + pendingURL}
+	if err := ledger.put(pendingURL, []string{pendingURL}, entry); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.put(newURL, []string{newURL}, Entry{Status: "ready"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	polls := 0
 	client := &fakeArchiveService{statusFn: func(context.Context, string) (capture, error) {
+		polls++
+		if polls == 100 {
+			cancel()
+		}
 		return capture{Status: "pending"}, nil
 	}}
-	r := runner{ledger: ledger, client: client, now: fixedTestTime, concurrency: 1, pollLimit: 1}
-	err := r.run(context.Background(), []string{pendingURL, newURL})
-	var unavailable *serviceUnavailable
-	if !errors.As(err, &unavailable) {
-		t.Fatalf("Polling exhaustion did not stop the batch: %v", err)
+	r := runner{ledger: ledger, client: client, now: fixedTestTime, concurrency: 1}
+	if err := r.run(ctx, []string{pendingURL, newURL}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Cancellation did not stop polling: %v", err)
 	}
-	if got := client.counts(); got != [3]int{0, 0, 1} {
-		t.Fatalf("Polling exhaustion released capacity for a new save: %v", got)
+	if got := client.counts(); got != [3]int{0, 0, 100} {
+		t.Fatalf("Cancellation submitted new work or stopped polling early: %v", got)
 	}
 	stored := testReadEntries(t, path)[pendingURL]
-	if stored.Status != "pending" || stored.JobID != entry.JobID {
+	if stored != entry {
 		t.Fatalf("Lost pending capture: %+v", stored)
+	}
+	resumed := &fakeArchiveService{}
+	if err := testRun(t, ledger, resumed, []string{pendingURL, newURL}); err != nil {
+		t.Fatal(err)
+	}
+	if got := resumed.counts(); got != [3]int{0, 1, 2} {
+		t.Fatalf("Resuming duplicated a pending submission: %v", got)
 	}
 }
 
