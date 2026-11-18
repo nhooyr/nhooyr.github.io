@@ -731,7 +731,6 @@ type runner struct {
 	concurrency  int
 	retryFailed  bool
 	pollInterval time.Duration
-	pollLimit    int
 	output       io.Writer
 	outputMu     sync.Mutex
 	now          func() time.Time
@@ -836,11 +835,10 @@ func (r *runner) recover(ctx context.Context, item work, fallback Entry) error {
 
 func (r *runner) finishJob(ctx context.Context, base string, aliases []string, entry Entry) error {
 	r.printf("%s: saving\n", base)
-	limit := r.pollLimit
-	if limit <= 0 {
-		limit = 36
-	}
-	for i := 0; i < limit; i++ {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		result, err := r.client.status(ctx, entry.JobID)
 		if err != nil {
 			var auth *authenticationError
@@ -886,8 +884,6 @@ func (r *runner) finishJob(ctx context.Context, base string, aliases []string, e
 		entry.Status, entry.Error = "uncertain", "unexpected capture response."
 		return r.ledger.put(base, aliases, entry)
 	}
-	r.printf("%s: still pending\n", base)
-	return &serviceUnavailable{message: "a capture is still pending; rerun to resume its job before submitting more captures."}
 }
 
 func (r *runner) store(item work, entry Entry) error {
