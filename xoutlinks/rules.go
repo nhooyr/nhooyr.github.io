@@ -10,7 +10,7 @@ var forbiddenHTTPStatus = regexp.MustCompile(`(?i)\bHTTP\s+status\s*=\s*403\b`)
 var missingHTTPStatus = regexp.MustCompile(`(?i)(\bHTTP\s+status\s*=\s*)404\b`)
 
 func (e Entry) permanentFailure() bool {
-	if e.Status == "needs_auth" {
+	if e.Status == "needs_auth" || e.Status == "replay_pending" {
 		return false
 	}
 	return e.Error == blockedURLError || e.Error == "error:no-access" || forbiddenHTTPStatus.MatchString(e.ErrorMsg)
@@ -21,7 +21,7 @@ func (e Entry) notFound() bool {
 }
 
 func normalizeFailure(raw string, entry Entry) Entry {
-	if entry.Status == "archived" || entry.Status == "needs_auth" || !entry.notFound() {
+	if entry.Status == "archived" || entry.Status == "needs_auth" || entry.Status == "replay_pending" || !entry.notFound() {
 		return entry
 	}
 	parsed, err := url.Parse(raw)
