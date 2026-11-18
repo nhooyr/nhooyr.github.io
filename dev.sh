@@ -11,4 +11,4 @@ cd "$(dirname "$0")"
 		sleep 0.1
 	done
 } &
-caddy run --watch .
+exec caddy run --watch .
