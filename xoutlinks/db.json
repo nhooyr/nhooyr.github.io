@@ -32,9 +32,11 @@
       "expires_at": "2027-05-18T09:59:14Z"
     },
     "https://discord.gg/PShenhb3": {
-      "status": "archived",
+      "status": "replay_pending",
       "archive_url": "https://web.archive.org/web/20261118075737/https://discord.com/invite/PShenhb3",
-      "expires_at": "2027-05-18T09:36:04Z"
+      "expires_at": "2027-05-18T09:36:04Z",
+      "error_msg": "verify archive replay https://web.archive.org/web/20261118075737/https://discord.com/invite/PShenhb3: wayback replay returned HTTP 404",
+      "retry_at": "2026-11-18T11:14:14.923161Z"
     },
     "https://github.com/nhooyr": {
       "status": "archived",
@@ -47,14 +49,18 @@
       "expires_at": "2027-05-18T09:36:06Z"
     },
     "https://github.com/nhooyr/flappybird": {
-      "status": "archived",
+      "status": "replay_pending",
       "archive_url": "https://web.archive.org/web/20261118090508/https://github.com/nhooyr/flappybird",
-      "expires_at": "2027-05-18T09:36:06Z"
+      "expires_at": "2027-05-18T09:36:06Z",
+      "error_msg": "verify archive replay https://web.archive.org/web/20261118090508/https://github.com/nhooyr/flappybird: wayback replay returned HTTP 404",
+      "retry_at": "2026-11-18T11:14:25.269821Z"
     },
     "https://github.com/search?q=involves%3Anhooyr&type=issues": {
-      "status": "archived",
+      "status": "replay_pending",
       "archive_url": "https://web.archive.org/web/20261118081125/https://github.com/search?q=involves%3Anhooyr&type=issues",
-      "expires_at": "2027-05-18T09:36:09Z"
+      "expires_at": "2027-05-18T09:36:09Z",
+      "error_msg": "verify archive replay https://web.archive.org/web/20261118081125/https://github.com/search?q=involves%3Anhooyr&type=issues: wayback replay returned HTTP 404",
+      "retry_at": "2026-11-18T11:14:17.052177Z"
     },
     "https://greed.bot": {
       "status": "archived",
@@ -77,14 +83,17 @@
       "expires_at": "2027-05-18T09:36:12Z"
     },
     "https://nelsonstar.com/2026/06/13/kaslo-shakespeare-festival-presents-as-you-like-it/": {
-      "status": "archived",
+      "status": "replay_pending",
       "archive_url": "https://web.archive.org/web/20261118083913/https://nelsonstar.com/2026/06/13/kaslo-shakespeare-festival-presents-as-you-like-it/",
-      "expires_at": "2027-05-18T08:39:42Z"
+      "expires_at": "2027-05-18T08:39:42Z",
+      "error_msg": "verify archive replay https://web.archive.org/web/20261118083913/https://nelsonstar.com/2026/06/13/kaslo-shakespeare-festival-presents-as-you-like-it/: wayback replay returned HTTP 404",
+      "retry_at": "2026-11-18T11:14:28.12127Z"
     },
     "https://open.spotify.com/user/31edap5bnzjwn54cpmznjrn632pm?si=78ac2b895f8540b0": {
-      "status": "archived",
+      "status": "replay_pending",
       "archive_url": "https://web.archive.org/web/20261118081138/https://open.spotify.com/user/31edap5bnzjwn54cpmznjrn632pm?si=78ac2b895f8540b0",
-      "expires_at": "2027-05-18T09:36:15Z"
+      "error_msg": "verify archive replay https://web.archive.org/web/20261118081138/https://open.spotify.com/user/31edap5bnzjwn54cpmznjrn632pm?si=78ac2b895f8540b0: wayback replay returned HTTP 404",
+      "retry_at": "2026-11-18T11:14:19.545356Z"
     },
     "https://powdertoy.co.uk/User.html?Name=anmol444": {
       "status": "archived",
@@ -97,9 +106,11 @@
       "expires_at": "2027-05-18T09:36:15Z"
     },
     "https://snapchat.com/t/8xdJbv0a": {
-      "status": "archived",
+      "status": "replay_pending",
       "archive_url": "https://web.archive.org/web/20261118081158/https://www.snapchat.com/@aqsnow?invite_id=ky28EsBQ&locale=en_CA&share_id=z1MACT62Ss2BDf6gwcEfQw&sid=e8cb0d0061fa4437bc35c20aa2f9acef",
-      "expires_at": "2027-05-18T10:21:52Z"
+      "expires_at": "2027-05-18T10:21:52Z",
+      "error_msg": "verify archive replay https://web.archive.org/web/20261118081158/https://www.snapchat.com/@aqsnow?invite_id=ky28EsBQ&locale=en_CA&share_id=z1MACT62Ss2BDf6gwcEfQw&sid=e8cb0d0061fa4437bc35c20aa2f9acef: wayback replay returned HTTP 404",
+      "retry_at": "2026-11-18T11:14:18.900951Z"
     },
     "https://stackexchange.com/users/5377228/nhooyr?tab=accounts": {
       "status": "archived",
@@ -107,9 +118,11 @@
       "expires_at": "2027-05-18T08:26:41Z"
     },
     "https://t.me/aqsnow0": {
-      "status": "archived",
+      "status": "replay_pending",
       "archive_url": "https://web.archive.org/web/20261118081415/https://t.me/aqsnow0",
-      "expires_at": "2027-05-18T09:36:17Z"
+      "expires_at": "2027-05-18T09:36:17Z",
+      "error_msg": "verify archive replay https://web.archive.org/web/20261118081415/https://t.me/aqsnow0: wayback replay returned HTTP 404",
+      "retry_at": "2026-11-18T11:14:22.673291Z"
     },
     "https://terrastruct.com": {
       "status": "archived",
@@ -122,9 +135,11 @@
       "error_msg": "The target server blocks access to https://us05web.zoom.us/j/8652767772?pwd=asTk9R4dmB9JFzZmsxspdtOWtlW68b.1. (HTTP status=403)"
     },
     "https://wa.me/aqsnow0?s=p": {
-      "status": "archived",
+      "status": "replay_pending",
       "archive_url": "https://web.archive.org/web/20261118081415/https://api.whatsapp.com/send/?text&username=aqsnow0&type=username&app_absent=0&s=p",
-      "expires_at": "2027-05-18T09:41:37Z"
+      "expires_at": "2027-05-18T09:41:37Z",
+      "error_msg": "verify archive replay https://web.archive.org/web/20261118081415/https://api.whatsapp.com/send/?text&username=aqsnow0&type=username&app_absent=0&s=p: wayback replay returned HTTP 404",
+      "retry_at": "2026-11-18T11:14:22.666007Z"
     },
     "https://www.engphys.ubc.ca/": {
       "status": "archived",
@@ -142,9 +157,11 @@
       "expires_at": "2027-05-18T09:41:43Z"
     },
     "https://www.facebook.com/aqsnow/photos_albums": {
-      "status": "archived",
+      "status": "replay_pending",
       "archive_url": "https://web.archive.org/web/20261118095345/https://www.facebook.com/aqsnow/photos_albums",
-      "expires_at": "2027-05-18T09:59:18Z"
+      "expires_at": "2027-05-18T09:59:18Z",
+      "error_msg": "verify archive replay https://web.archive.org/web/20261118095345/https://www.facebook.com/aqsnow/photos_albums: wayback replay returned HTTP 404",
+      "retry_at": "2026-11-18T11:14:27.404195Z"
     },
     "https://www.facebook.com/kaslojazz/": {
       "status": "archived",
@@ -152,24 +169,32 @@
       "expires_at": "2027-05-18T10:03:56Z"
     },
     "https://www.facebook.com/p/Kaslo-Area-Fire-Department-100066550095766/": {
-      "status": "archived",
+      "status": "replay_pending",
       "archive_url": "https://web.archive.org/web/20261118101621/https://www.facebook.com/login/?next=https%3A%2F%2Fwww.facebook.com%2Fp%2FKaslo-Area-Fire-Department-100066550095766%2F",
-      "expires_at": "2027-05-18T10:17:38Z"
+      "expires_at": "2027-05-18T10:17:38Z",
+      "error_msg": "verify archive replay https://web.archive.org/web/20261118101621/https://www.facebook.com/login/?next=https%3A%2F%2Fwww.facebook.com%2Fp%2FKaslo-Area-Fire-Department-100066550095766%2F: wayback replay returned HTTP 404",
+      "retry_at": "2026-11-18T11:14:32.991626Z"
     },
     "https://www.facebook.com/p/Kaslo-District-Public-Library-100068635964711/": {
-      "status": "archived",
+      "status": "replay_pending",
       "archive_url": "https://web.archive.org/web/20261118101626/https://www.facebook.com/login/?next=https%3A%2F%2Fwww.facebook.com%2Fp%2FKaslo-District-Public-Library-100068635964711%2F",
-      "expires_at": "2027-05-18T10:17:42Z"
+      "expires_at": "2027-05-18T10:17:42Z",
+      "error_msg": "verify archive replay https://web.archive.org/web/20261118101626/https://www.facebook.com/login/?next=https%3A%2F%2Fwww.facebook.com%2Fp%2FKaslo-District-Public-Library-100068635964711%2F: wayback replay returned HTTP 404",
+      "retry_at": "2026-11-18T11:14:33.050638Z"
     },
     "https://www.facebook.com/photo/?fbid=122124760107279706&set=a.122124760995279706": {
-      "status": "archived",
+      "status": "replay_pending",
       "archive_url": "https://web.archive.org/web/20261118102132/https://www.facebook.com/photo/?fbid=122124760107279706&set=a.122124760995279706",
-      "expires_at": "2027-05-18T10:21:47Z"
+      "expires_at": "2027-05-18T10:21:47Z",
+      "error_msg": "verify archive replay https://web.archive.org/web/20261118102132/https://www.facebook.com/photo/?fbid=122124760107279706&set=a.122124760995279706: wayback replay returned HTTP 404",
+      "retry_at": "2026-11-18T11:14:34.647784Z"
     },
     "https://www.flickr.com/people/aqsnow/": {
-      "status": "archived",
+      "status": "replay_pending",
       "archive_url": "https://web.archive.org/web/20261118103922/https://www.flickr.com/people/aqsnow/",
-      "expires_at": "2027-05-18T10:39:37Z"
+      "expires_at": "2027-05-18T10:39:37Z",
+      "error_msg": "verify archive replay https://web.archive.org/web/20261118103922/https://www.flickr.com/people/aqsnow/: wayback replay returned HTTP 404",
+      "retry_at": "2026-11-18T11:14:35.467613Z"
     },
     "https://www.instagram.com/aqsnow0": {
       "status": "blocked",
@@ -186,9 +211,11 @@
       "error_msg": "The target server cannot find https://www.linkedin.com/in/aqsnow/. (HTTP status=403)"
     },
     "https://www.mississauga.com/news/young-entrepreneurs-put-wares-to-the-test-at-trade-show/article_fc942f8e-56b0-5ce3-8d39-8887c4da6e9c.html": {
-      "status": "archived",
+      "status": "replay_pending",
       "archive_url": "https://web.archive.org/web/20261118073624/https://www.mississauga.com/news/young-entrepreneurs-put-wares-to-the-test-at-trade-show/article_fc942f8e-56b0-5ce3-8d39-8887c4da6e9c.html",
-      "expires_at": "2027-05-18T08:26:41Z"
+      "expires_at": "2027-05-18T08:26:41Z",
+      "error_msg": "verify archive replay https://web.archive.org/web/20261118073624/https://www.mississauga.com/news/young-entrepreneurs-put-wares-to-the-test-at-trade-show/article_fc942f8e-56b0-5ce3-8d39-8887c4da6e9c.html: wayback replay returned HTTP 404",
+      "retry_at": "2026-11-18T11:14:09.823695Z"
     },
     "https://www.nfpa.org/codes-and-standards/nfpa-1001-standard-development/1001": {
       "status": "archived",
@@ -201,18 +228,22 @@
       "expires_at": "2027-05-18T08:26:41Z"
     },
     "https://www.pinterest.com/aqsnow": {
-      "status": "archived",
+      "status": "replay_pending",
       "archive_url": "https://web.archive.org/web/20261118104505/https://www.pinterest.com/aqsnow/",
-      "expires_at": "2027-05-18T10:45:20Z"
+      "expires_at": "2027-05-18T10:45:20Z",
+      "error_msg": "verify archive replay https://web.archive.org/web/20261118104505/https://www.pinterest.com/aqsnow/: wayback replay returned HTTP 404",
+      "retry_at": "2026-11-18T11:14:36.374688Z"
     },
     "https://www.reddit.com/user/aqsnow/": {
       "status": "pending",
       "job_id": "spn2-7d24602b9c18439a9f218038451e2c4781473974"
     },
     "https://www.rescuecanada.ca/course-category/swiftwater": {
-      "status": "archived",
+      "status": "replay_pending",
       "archive_url": "https://web.archive.org/web/20261118081740/https://www.rescuecanada.ca/course-category/swiftwater",
-      "expires_at": "2027-05-18T08:26:41Z"
+      "expires_at": "2027-05-18T08:26:41Z",
+      "error_msg": "verify archive replay https://web.archive.org/web/20261118081740/https://www.rescuecanada.ca/course-category/swiftwater: wayback replay returned HTTP 404",
+      "retry_at": "2026-11-18T11:14:24.290977Z"
     },
     "https://www.threads.com/@aqsnow0": {
       "status": "pending",

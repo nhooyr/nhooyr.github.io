@@ -37,6 +37,7 @@ import (
 
 var archivePattern = regexp.MustCompile(`^https?://web\.archive\.org/web/([0-9]{14})/https?://.+$`)
 var errIncomplete = errors.New("some links are not archived; see xoutlinks/db.json")
+var errReplayNotFound = errors.New("wayback replay returned HTTP 404")
 
 const databaseVersion = 1
 const blockedURLError = "error:blocked-url"
@@ -221,7 +222,7 @@ func loadLedgerAt(path string, now time.Time) (*Ledger, error) {
 		if normalized := normalizeFailure(raw, entry); normalized != entry {
 			entry, rewrite = normalized, true
 		}
-		if entry.Status == "" || (entry.Status == "archived" && !archivePattern.MatchString(entry.ArchiveURL)) {
+		if entry.Status == "" || ((entry.Status == "archived" || entry.Status == "replay_pending") && !archivePattern.MatchString(entry.ArchiveURL)) {
 			return nil, fmt.Errorf("invalid archive ledger entry: %s", raw)
 		}
 		for _, timestamp := range []string{entry.ExpiresAt, entry.RefreshStartedAt, entry.RetryAt} {
@@ -241,9 +242,6 @@ func loadLedgerAt(path string, now time.Time) (*Ledger, error) {
 			rewrite = true
 		} else if entry.permanentFailure() && (entry.Status != "blocked" || entry.JobID != "" || entry.RetryAt != "") {
 			entry.Status, entry.JobID, entry.RetryAt = "blocked", "", ""
-			rewrite = true
-		} else if entry.Status == "blocked" && entry.notFound() && !entry.permanentFailure() {
-			entry.Status = "failed"
 			rewrite = true
 		}
 		l.data[raw] = entry
@@ -477,6 +475,7 @@ func fatalServiceError(err error) bool {
 type archiveService interface {
 	authenticated() bool
 	available(context.Context, string) (string, error)
+	verifyReplay(context.Context, string) error
 	save(context.Context, string) (capture, error)
 	status(context.Context, string) (capture, error)
 }
@@ -601,7 +600,7 @@ func newClient(credentials string) (*Client, error) {
 	return c, nil
 }
 
-func (c *Client) request(ctx context.Context, endpoint string, data url.Values, output any) error {
+func (c *Client) request(ctx context.Context, method, endpoint string, data url.Values, output any) error {
 	attempts := 3
 	if data != nil {
 		attempts = 1 // A timed-out POST may already have started a capture.
@@ -611,7 +610,7 @@ func (c *Client) request(ctx context.Context, endpoint string, data url.Values, 
 	}
 	var last error
 	for attempt := 0; attempt < attempts; {
-		retry, err := c.requestOnce(ctx, endpoint, data, output)
+		retry, err := c.requestOnce(ctx, method, endpoint, data, output)
 		var limited *serviceUnavailable
 		if errors.As(err, &limited) && !limited.retryAt.IsZero() {
 			until := c.requestGate.postpone(limited.retryAt)
@@ -641,23 +640,24 @@ func (c *Client) request(ctx context.Context, endpoint string, data url.Values, 
 	return &serviceUnavailable{message: last.Error()}
 }
 
-// requestOnce reports whether a failed GET can safely be retried. Only an
+// requestOnce reports whether a failed GET or HEAD can safely be retried. Only an
 // explicit HTTP 429 permits a POST retry; ambiguous failures are never retried.
-func (c *Client) requestOnce(ctx context.Context, endpoint string, data url.Values, output any) (bool, error) {
+func (c *Client) requestOnce(ctx context.Context, method, endpoint string, data url.Values, output any) (bool, error) {
 	if err := c.pace(ctx, data != nil); err != nil {
 		return false, err
 	}
-	method := http.MethodGet
 	var body io.Reader
 	if data != nil {
-		method, body = http.MethodPost, strings.NewReader(data.Encode())
+		body = strings.NewReader(data.Encode())
 	}
 	request, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
 		return false, err
 	}
-	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", "blog-archive-links/1.0")
+	if method != http.MethodHead {
+		request.Header.Set("Accept", "application/json")
+	}
 	if data != nil {
 		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		// Another worker can discover rejected credentials while this one waits.
@@ -665,7 +665,7 @@ func (c *Client) requestOnce(ctx context.Context, endpoint string, data url.Valu
 			return false, &authenticationError{"internet archive credentials need to be updated."}
 		}
 	}
-	if c.authorization != "" {
+	if c.authorization != "" && method != http.MethodHead {
 		request.Header.Set("Authorization", c.authorization)
 	}
 	response, err := c.httpClient.Do(request)
@@ -688,11 +688,20 @@ func (c *Client) requestOnce(ctx context.Context, endpoint string, data url.Valu
 		return false, &authenticationError{fmt.Sprintf("wayback API returned HTTP %d; check Internet Archive credentials.", response.StatusCode)}
 	}
 	if response.StatusCode != http.StatusOK {
+		if method == http.MethodHead && response.StatusCode == http.StatusNotFound {
+			return false, errReplayNotFound
+		}
 		err := fmt.Errorf("wayback returned HTTP %d", response.StatusCode)
 		if response.StatusCode >= 500 && data != nil {
 			return false, &serviceUnavailable{message: err.Error() + "; captures paused. Rerun later to recover the submission."}
 		}
 		return response.StatusCode >= 500, err
+	}
+	if method == http.MethodHead {
+		if !archivePattern.MatchString(response.Request.URL.String()) {
+			return false, errors.New("wayback replay redirected outside an archived page")
+		}
+		return false, nil
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 8<<20)).Decode(output); err != nil {
 		return true, fmt.Errorf("decode Wayback response: %w", err)
@@ -710,7 +719,7 @@ func (c *Client) available(ctx context.Context, raw string) (string, error) {
 			} `json:"closest"`
 		} `json:"archived_snapshots"`
 	}
-	err := c.request(ctx, c.availabilityURL+"?"+url.Values{"url": {raw}}.Encode(), nil, &result)
+	err := c.request(ctx, http.MethodGet, c.availabilityURL+"?"+url.Values{"url": {raw}}.Encode(), nil, &result)
 	if err != nil {
 		return "", err
 	}
@@ -721,16 +730,24 @@ func (c *Client) available(ctx context.Context, raw string) (string, error) {
 	return "", nil
 }
 
+func (c *Client) verifyReplay(ctx context.Context, archive string) error {
+	// Wayback's index can report a successful capture that cannot be replayed.
+	if err := c.request(ctx, http.MethodHead, archive, nil, nil); err != nil {
+		return fmt.Errorf("verify archive replay %s: %w", archive, err)
+	}
+	return nil
+}
+
 func (c *Client) save(ctx context.Context, raw string) (capture, error) {
 	var result capture
 	// Outlink capture is opt-in; leave it disabled for these per-page requests.
-	err := c.request(ctx, c.saveURL, url.Values{"url": {raw}, "skip_first_archive": {"1"}, "if_not_archived_within": {"3600"}}, &result)
+	err := c.request(ctx, http.MethodPost, c.saveURL, url.Values{"url": {raw}, "skip_first_archive": {"1"}, "if_not_archived_within": {"3600"}}, &result)
 	return result, err
 }
 
 func (c *Client) status(ctx context.Context, job string) (capture, error) {
 	var result capture
-	err := c.request(ctx, c.saveURL+"/status/"+url.PathEscape(job), nil, &result)
+	err := c.request(ctx, http.MethodGet, c.saveURL+"/status/"+url.PathEscape(job), nil, &result)
 	return result, err
 }
 
@@ -756,13 +773,6 @@ func (r *runner) currentTime() time.Time {
 		return r.now().UTC()
 	}
 	return time.Now().UTC()
-}
-
-func (r *runner) archivedEntry(archive string) Entry {
-	return Entry{
-		Status: "archived", ArchiveURL: archive,
-		ExpiresAt: expiryAfterSixMonths(r.currentTime()).Format(time.RFC3339),
-	}
 }
 
 func (r *runner) acceptsArchive(previous Entry, archive string) bool {
@@ -899,9 +909,30 @@ func (r *runner) recover(ctx context.Context, item work, fallback Entry) error {
 		return r.store(item, fallback)
 	}
 	if archive != "" && r.acceptsArchive(item.entry, archive) {
-		fallback = r.archivedEntry(archive)
+		return r.replay(ctx, item, Entry{ArchiveURL: archive})
 	}
 	return r.ledger.put(item.base, item.aliases, fallback)
+}
+
+func (r *runner) replay(ctx context.Context, item work, entry Entry) error {
+	entry = transition(entry, "replay_pending")
+	if err := r.store(item, entry); err != nil {
+		return err
+	}
+	item.entry = entry
+	r.printf("%s: checking replay\n", item.base)
+	if err := r.client.verifyReplay(ctx, entry.ArchiveURL); err != nil {
+		return r.fail(item, "replay_pending", err)
+	}
+	entry.Status, entry.RefreshStartedAt = "archived", ""
+	if entry.ExpiresAt == "" {
+		entry.ExpiresAt = expiryAfterSixMonths(r.currentTime()).Format(time.RFC3339)
+	}
+	if err := r.store(item, entry); err != nil {
+		return err
+	}
+	r.printf("%s: archived\n", item.base)
+	return nil
 }
 
 func (r *runner) finishJob(ctx context.Context, base string, aliases []string, entry Entry) error {
@@ -928,7 +959,7 @@ func (r *runner) finishJob(ctx context.Context, base string, aliases []string, e
 		case "success":
 			archive := "https://web.archive.org/web/" + result.Timestamp + "/" + result.OriginalURL
 			if archivePattern.MatchString(archive) && r.acceptsArchive(entry, archive) {
-				return r.ledger.put(base, aliases, r.archivedEntry(archive))
+				return r.replay(ctx, work{base, aliases, entry}, Entry{ArchiveURL: archive})
 			}
 			entry = transition(entry, "failed")
 			entry.ErrorMsg = "wayback returned an old or invalid snapshot instead of refreshing it."
@@ -989,6 +1020,8 @@ func (r *runner) process(ctx context.Context, item work) (err error) {
 	}
 	lookup := false
 	switch entry.Status {
+	case "replay_pending":
+		return r.replay(ctx, item, entry)
 	case "archived":
 		if !entryExpired(entry, r.currentTime()) {
 			return r.store(item, entry)
@@ -1021,7 +1054,7 @@ func (r *runner) process(ctx context.Context, item work) (err error) {
 		}
 		if archive != "" && r.acceptsArchive(entry, archive) {
 			r.printf("%s: found: %s\n", item.base, archive)
-			return r.store(item, r.archivedEntry(archive))
+			return r.replay(ctx, item, Entry{ArchiveURL: archive})
 		}
 		entry = transition(entry, "ready")
 		if entry.ArchiveURL != "" {
@@ -1057,14 +1090,7 @@ func (r *runner) process(ctx context.Context, item work) (err error) {
 	if err := r.store(item, entry); err != nil {
 		return err
 	}
-	if err := r.finishJob(ctx, item.base, item.aliases, entry); err != nil {
-		return err
-	}
-	entry, _ = r.ledger.record(item.base)
-	if entry.errorText() == "" {
-		r.printf("%s: %s\n", item.base, entry.Status)
-	}
-	return nil
+	return r.finishJob(ctx, item.base, item.aliases, entry)
 }
 
 func (r *runner) run(ctx context.Context, urls []string) (runError error) {

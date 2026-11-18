@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -37,6 +38,7 @@ type fakeArchiveService struct {
 	saveCalls       []string
 	statusCalls     []string
 	availableFn     func(context.Context, string) (string, error)
+	verifyFn        func(context.Context, string) error
 	saveFn          func(context.Context, string) (capture, error)
 	statusFn        func(context.Context, string) (capture, error)
 }
@@ -51,6 +53,13 @@ func (f *fakeArchiveService) available(ctx context.Context, url string) (string,
 		return f.availableFn(ctx, url)
 	}
 	return "", nil
+}
+
+func (f *fakeArchiveService) verifyReplay(ctx context.Context, archive string) error {
+	if f.verifyFn != nil {
+		return f.verifyFn(ctx, archive)
+	}
+	return nil
 }
 
 func (f *fakeArchiveService) save(ctx context.Context, url string) (capture, error) {
@@ -731,30 +740,6 @@ func TestOrdinary404FailuresRetry(t *testing.T) {
 	}
 }
 
-func TestLoadingRestoresRetriesForBlocked404Failures(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "db.json")
-	raw := "https://example.com/page"
-	entry := Entry{Status: "blocked", Error: "error:not-found", ErrorMsg: "Page not found. (HTTP status=404)", RetryAt: testNow.Add(time.Minute).Format(time.RFC3339)}
-	if err := writeJSON(path, database{Version: databaseVersion, Entries: map[string]Entry{raw: entry}}); err != nil {
-		t.Fatal(err)
-	}
-	ledger, err := loadLedgerAt(path, testNow)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entry.Status = "failed"
-	if got := testReadEntries(t, path)[raw]; got != entry {
-		t.Fatalf("Ordinary 404 did not retain its details and retry deadline: %+v", got)
-	}
-	client := &fakeArchiveService{}
-	r := runner{ledger: ledger, client: client, retryInterval: time.Millisecond, now: func() time.Time { return testNow.Add(time.Hour) }}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := r.run(ctx, []string{raw}); err != nil || client.counts() != [3]int{1, 1, 1} {
-		t.Fatalf("Previously blocked 404 was not retried: %v, %v", err, client.counts())
-	}
-}
-
 func TestGlobalAndURLRetryDeadlinesAreBothRespected(t *testing.T) {
 	for _, globalLater := range []bool{false, true} {
 		t.Run(fmt.Sprint(globalLater), func(t *testing.T) {
@@ -1122,29 +1107,156 @@ func TestSaveFormPreservesURLWithoutCapturingOutlinks(t *testing.T) {
 
 func TestAvailabilityQueryPreservesOriginalURL(t *testing.T) {
 	original := "https://example.com/search?q=a%2Bb&next=https%3A%2F%2Fexample.org"
-	requests := make(chan string, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests <- r.URL.Query().Get("url")
-		json.NewEncoder(w).Encode(map[string]any{
-			"archived_snapshots": map[string]any{"closest": map[string]any{
-				"available": true, "status": "200", "url": testSnapshot(original),
-			}},
-		})
-	}))
-	defer server.Close()
-	client := &Client{httpClient: server.Client(), availabilityURL: server.URL}
+	var requested string
+	var verified bool
+	client := &Client{availabilityURL: "https://archive.test/available", httpClient: &http.Client{Transport: testRoundTripper(func(r *http.Request) (*http.Response, error) {
+		body := ""
+		if r.Method == http.MethodHead {
+			if r.URL.String() != testSnapshot(original) {
+				t.Errorf("Unexpected replay URL: %s", r.URL)
+			}
+			verified = true
+		} else {
+			requested = r.URL.Query().Get("url")
+			body = fmt.Sprintf(`{"archived_snapshots":{"closest":{"available":true,"status":"200","url":%q}}}`, testSnapshot(original))
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	})}}
 	archive, err := client.available(context.Background(), original)
 	if err != nil || archive != testSnapshot(original) {
 		t.Fatalf("Unexpected availability result: %q, %v", archive, err)
 	}
-	if got := <-requests; got != original {
-		t.Fatalf("Availability request altered the URL: %q", got)
+	if requested != original || verified {
+		t.Fatalf("Availability request altered the URL or checked replay before preserving the index result: %q, %v", requested, verified)
 	}
 }
 
 type testRoundTripper func(*http.Request) (*http.Response, error)
 
 func (f testRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestMissingReplayResumesWithoutDuplicateCaptures(t *testing.T) {
+	for _, source := range []string{"availability", "job"} {
+		t.Run(source, func(t *testing.T) {
+			ledger, path := newTestLedger(t)
+			raw := "https://open.spotify.com/user/example?si=tracking"
+			if source == "job" {
+				if err := ledger.put(raw, []string{raw}, Entry{Status: "pending", JobID: "existing-job"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			playable := false
+			var calls, saves int
+			client := &Client{availabilityURL: "https://archive.test/available", saveURL: "https://archive.test/save", authorization: "LOW test:test"}
+			client.httpClient = &http.Client{Transport: testRoundTripper(func(r *http.Request) (*http.Response, error) {
+				calls++
+				status, body := http.StatusOK, ""
+				switch {
+				case r.Method == http.MethodHead:
+					if r.URL.String() != testSnapshot(raw) || r.Header.Get("Authorization") != "" {
+						t.Errorf("Incorrect replay request: %s, %v", r.URL, r.Header)
+					}
+					if !playable {
+						status = http.StatusNotFound
+					}
+				case r.Method == http.MethodGet && r.URL.Path == "/available":
+					body = fmt.Sprintf(`{"archived_snapshots":{"closest":{"available":true,"status":"200","url":%q}}}`, testSnapshot(raw))
+				case r.Method == http.MethodGet && r.URL.Path == "/save/status/existing-job":
+					body = fmt.Sprintf(`{"status":"success","timestamp":%q,"original_url":%q}`, testTimestamp, raw)
+				case r.Method == http.MethodPost && r.URL.Path == "/save":
+					saves++
+					body = `{"job_id":"existing-job"}`
+				default:
+					t.Errorf("Unexpected request, possibly a duplicate capture: %s %s", r.Method, r.URL)
+					status = http.StatusBadRequest
+				}
+				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+			})}
+			if err := testRun(t, ledger, client, []string{raw}); !errors.Is(err, errIncomplete) {
+				t.Fatalf("Unplayable snapshot was accepted: %v", err)
+			}
+			entry := testReadEntries(t, path)[raw]
+			if entry.Status != "replay_pending" || entry.ArchiveURL != testSnapshot(raw) || entry.ExpiresAt != "" || !strings.Contains(entry.ErrorMsg, "HTTP 404") || entry.permanentFailure() {
+				t.Fatalf("Unplayable snapshot was stored as successful or permanent: %+v", entry)
+			}
+			if entry.JobID != "" {
+				t.Fatalf("Completed capture should only poll its saved replay URL: %+v", entry)
+			}
+			loaded, err := loadLedgerAt(path, testNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			playable = true
+			if err := testRun(t, loaded, client, []string{raw}); err != nil {
+				t.Fatal(err)
+			}
+			if entry = testReadEntries(t, path)[raw]; entry.Status != "archived" || entry.ArchiveURL != testSnapshot(raw) || entry.ErrorMsg != "" {
+				t.Fatalf("Playable snapshot did not finish cleanly: %+v", entry)
+			}
+			wantCalls, wantSaves := 3, 0
+			if calls != wantCalls || saves != wantSaves {
+				t.Fatalf("Unexpected work: %d requests, %d saves; want %d requests, %d saves", calls, saves, wantCalls, wantSaves)
+			}
+			if err := testRun(t, loaded, client, []string{raw}); err != nil || calls != wantCalls {
+				t.Fatalf("Fresh snapshot caused unnecessary requests: %v, %d", err, calls)
+			}
+		})
+	}
+}
+
+func TestReplayVerificationRespectsRateLimits(t *testing.T) {
+	var requests, cooldowns int
+	client := &Client{onRateLimit: func(time.Time) error { cooldowns++; return nil }}
+	client.httpClient = &http.Client{Transport: testRoundTripper(func(r *http.Request) (*http.Response, error) {
+		requests++
+		status := http.StatusOK
+		if requests == 1 {
+			status = http.StatusTooManyRequests
+		}
+		return &http.Response{StatusCode: status, Header: http.Header{"Retry-After": {"0"}}, Body: http.NoBody, Request: r}, nil
+	})}
+	if err := client.verifyReplay(context.Background(), testSnapshot("https://example.com/page")); err != nil || requests != 2 || cooldowns != 1 {
+		t.Fatalf("Replay check ignored the shared rate limit: %v, %d requests, %d cooldowns", err, requests, cooldowns)
+	}
+}
+
+func TestReplayPollingPreservesSnapshotAndExpiryWithoutCredentials(t *testing.T) {
+	ledger, path := newTestLedger(t)
+	raw := "https://example.com/page"
+	aliases := []string{raw, raw + "#section"}
+	expiry := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	entry := Entry{Status: "replay_pending", ArchiveURL: testSnapshot(raw), ExpiresAt: expiry}
+	if err := ledger.put(raw, aliases, entry); err != nil {
+		t.Fatal(err)
+	}
+	var checks atomic.Int32
+	client := &fakeArchiveService{unauthenticated: true, verifyFn: func(_ context.Context, archive string) error {
+		if archive != entry.ArchiveURL {
+			t.Errorf("Replay URL changed: %s", archive)
+		}
+		switch checks.Add(1) {
+		case 1:
+			return errors.New("replay temporarily unavailable (HTTP status=403)")
+		case 2:
+			return errReplayNotFound
+		}
+		return nil
+	}}
+	r := runner{ledger: ledger, client: client, retryInterval: time.Millisecond, concurrency: 1}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := r.run(ctx, aliases); err != nil {
+		t.Fatal(err)
+	}
+	if checks.Load() != 3 || client.counts() != [3]int{} {
+		t.Fatalf("Replay polling performed other requests: %d checks, %v", checks.Load(), client.counts())
+	}
+	for raw, got := range testReadEntries(t, path) {
+		if got.Status != "archived" || got.ArchiveURL != testSnapshot(raw) || got.ExpiresAt != expiry || got.RetryAt != "" || got.Error != "" || got.ErrorMsg != "" {
+			t.Errorf("Replay completion lost the snapshot, expiry, or clean state: %+v", got)
+		}
+	}
+}
 
 func TestSaveTimeoutIsNeverRetried(t *testing.T) {
 	var requests atomic.Int32
@@ -1185,7 +1297,7 @@ func TestHTTPRateLimitWaitsThenRetries(t *testing.T) {
 				data = url.Values{"url": {"https://example.com/page"}}
 			}
 			var result map[string]any
-			if err := client.request(context.Background(), server.URL, data, &result); err != nil {
+			if err := client.request(context.Background(), method, server.URL, data, &result); err != nil {
 				t.Fatal(err)
 			}
 			if requests.Load() != 2 || retryAt.IsZero() || time.Now().Before(retryAt) {
@@ -2374,11 +2486,11 @@ func TestRateLimitPausesOtherRequests(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		var result map[string]any
-		done <- client.request(context.Background(), server.URL+"/first", nil, &result)
+		done <- client.request(context.Background(), http.MethodGet, server.URL+"/first", nil, &result)
 	}()
 	until := <-limited
 	var result map[string]any
-	if err := client.request(context.Background(), server.URL+"/other", nil, &result); err != nil {
+	if err := client.request(context.Background(), http.MethodGet, server.URL+"/other", nil, &result); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-done; err != nil {
@@ -2412,6 +2524,13 @@ func TestRateLimitedPendingJobWaitsAndKeepsItsID(t *testing.T) {
 	}))
 	defer server.Close()
 	client := &Client{httpClient: server.Client(), saveURL: server.URL}
+	transport := client.httpClient.Transport
+	client.httpClient.Transport = testRoundTripper(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodHead {
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}, nil
+		}
+		return transport.RoundTrip(r)
+	})
 	client.onRateLimit = func(until time.Time) error {
 		stored := testReadEntries(t, path)[raw]
 		if stored.Status != "pending" || stored.JobID != "existing-job" || testReadDatabase(t, path).RetryAt == "" {
