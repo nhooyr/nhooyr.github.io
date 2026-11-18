@@ -391,7 +391,7 @@ func TestReadyCheckpointSkipsAvailability(t *testing.T) {
 	}
 }
 
-func TestCanceledSubmissionIsNotPostedAgain(t *testing.T) {
+func TestCanceledSubmissionReusesAvailableCapture(t *testing.T) {
 	ledger, path := newTestLedger(t)
 	url := "https://example.com/page"
 	ctx, cancel := context.WithCancel(context.Background())
@@ -407,36 +407,101 @@ func TestCanceledSubmissionIsNotPostedAgain(t *testing.T) {
 	if err := r.run(ctx, []string{url}); err == nil {
 		t.Fatal("Expected canceled submission error")
 	}
-	resumed := &fakeArchiveService{}
-	if err := testRun(t, ledger, resumed, []string{url}); !errors.Is(err, errIncomplete) {
-		t.Fatalf("Expected an incomplete archive after interrupted submission: %v", err)
+	resumed := &fakeArchiveService{availableFn: func(context.Context, string) (string, error) { return testSnapshot(url), nil }}
+	if err := testRun(t, ledger, resumed, []string{url}); err != nil {
+		t.Fatalf("Interrupted submission did not recover its capture: %v", err)
 	}
-	if got := resumed.counts(); got[1] != 0 || got[2] != 0 {
+	if got := resumed.counts(); got != [3]int{1, 0, 0} {
 		t.Fatalf("Interrupted capture was resubmitted: %v", got)
 	}
 }
 
-func TestFailedEntriesRequireExplicitRetry(t *testing.T) {
+func TestFailedEntriesRetryAutomatically(t *testing.T) {
 	ledger, path := newTestLedger(t)
 	url := "https://example.com/page"
 	if err := ledger.put(url, []string{url}, Entry{Status: "failed", Error: "Unavailable"}); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := os.ReadFile(path)
 	client := &fakeArchiveService{}
-	if err := testRun(t, ledger, client, []string{url}); !errors.Is(err, errIncomplete) {
-		t.Fatalf("Expected incomplete status: %v", err)
-	}
-	after, _ := os.ReadFile(path)
-	if got := client.counts(); got != [3]int{} || string(before) != string(after) {
-		t.Fatalf("Cached failure was retried or changed: %v", got)
-	}
-	r := runner{ledger: ledger, client: client, now: fixedTestTime, concurrency: 3, retryFailed: true}
-	if err := r.run(context.Background(), []string{url}); err != nil {
+	if err := testRun(t, ledger, client, []string{url}); err != nil {
 		t.Fatal(err)
 	}
 	if got := client.counts(); got != [3]int{1, 1, 1} {
-		t.Fatalf("Explicit retry did not run once: %v", got)
+		t.Fatalf("Automatic retry did not run once: %v", got)
+	}
+	if got := testReadEntries(t, path)[url]; got.Status != "archived" || got.Error != "" {
+		t.Fatalf("Automatic retry did not clear the failure: %+v", got)
+	}
+	if err := testRun(t, ledger, client, []string{url}); err != nil || client.counts() != [3]int{1, 1, 1} {
+		t.Fatalf("Successful retry was repeated: %v, %v", client.counts(), err)
+	}
+}
+
+func TestBlockedURLsAreSavedAndIgnoredOnLaterRuns(t *testing.T) {
+	for _, stage := range []string{"save", "status"} {
+		t.Run(stage, func(t *testing.T) {
+			ledger, path := newTestLedger(t)
+			blocked, good := "https://example.com/blocked", "https://example.com/good"
+			client := &fakeArchiveService{
+				saveFn: func(_ context.Context, raw string) (capture, error) {
+					if stage == "save" && raw == blocked {
+						return capture{Status: "error", StatusExt: blockedURLError}, nil
+					}
+					return capture{JobID: "job:" + raw}, nil
+				},
+				statusFn: func(_ context.Context, job string) (capture, error) {
+					raw := strings.TrimPrefix(job, "job:")
+					if raw == blocked {
+						return capture{Status: "error", StatusExt: blockedURLError}, nil
+					}
+					return capture{Status: "success", Timestamp: testTimestamp, OriginalURL: raw}, nil
+				},
+			}
+			r := runner{ledger: ledger, client: client, now: fixedTestTime, concurrency: 1}
+			if err := r.run(context.Background(), []string{blocked, good}); !errors.Is(err, errIncomplete) {
+				t.Fatalf("First blocked result should be reported after the batch: %v", err)
+			}
+			entries := testReadEntries(t, path)
+			if got := entries[blocked]; got.Status != "blocked" || got.Error != blockedURLError || got.JobID != "" {
+				t.Fatalf("Blocked result was not saved permanently: %+v", got)
+			}
+			if entries[good].Status != "archived" || len(client.availableCalls) != 2 {
+				t.Fatal("Blocked result prevented other work or caused an extra lookup")
+			}
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resumed := &fakeArchiveService{}
+			r.client = resumed
+			if err := r.run(context.Background(), []string{blocked, good}); err != nil {
+				t.Fatalf("Cached blocked URL was not ignored: %v", err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || resumed.counts() != [3]int{} || string(before) != string(after) {
+				t.Fatalf("Blocked URL caused repeat work: %v, %v", resumed.counts(), err)
+			}
+		})
+	}
+}
+
+func TestLoadingMigratesPreviouslyBlockedFailures(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db.json")
+	raw := "https://example.com/blocked"
+	if err := writeJSON(path, database{Version: databaseVersion, Entries: map[string]Entry{raw: {Status: "failed", Error: blockedURLError}}}); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := loadLedgerAt(path, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeArchiveService{}
+	r := runner{ledger: ledger, client: client, now: fixedTestTime}
+	if err := r.run(context.Background(), []string{raw}); err != nil || client.counts() != [3]int{} {
+		t.Fatalf("Previously blocked URL was retried: %v, %v", client.counts(), err)
+	}
+	if got := testReadEntries(t, path)[raw]; got.Status != "blocked" || got.Error != blockedURLError {
+		t.Fatalf("Blocked failure was not migrated: %+v", got)
 	}
 }
 
@@ -490,15 +555,14 @@ func TestCaptureConcurrencyIsBounded(t *testing.T) {
 	}
 }
 
-func TestLookupServiceFailureCancelsQueuedWork(t *testing.T) {
-	ledger, _ := newTestLedger(t)
+func TestLookupServiceFailureDoesNotCancelQueuedWork(t *testing.T) {
+	ledger, path := newTestLedger(t)
 	urls := []string{"https://example.com/1", "https://example.com/2", "https://example.com/3", "https://example.com/4", "https://example.com/5", "https://example.com/6"}
-	client := &fakeArchiveService{availableFn: func(ctx context.Context, url string) (string, error) {
+	client := &fakeArchiveService{availableFn: func(_ context.Context, url string) (string, error) {
 		if url == urls[0] {
-			return "", &serviceUnavailable{message: "Rate limited"}
+			return "", &serviceUnavailable{message: "service unavailable"}
 		}
-		<-ctx.Done()
-		return "", ctx.Err()
+		return testSnapshot(url), nil
 	}}
 	r := runner{ledger: ledger, client: client, now: fixedTestTime, concurrency: 3}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -508,8 +572,17 @@ func TestLookupServiceFailureCancelsQueuedWork(t *testing.T) {
 	if !errors.As(err, &unavailable) {
 		t.Fatalf("Expected service failure: %v", err)
 	}
-	if got := client.counts(); got[0] > 3 || got[1] != 0 {
-		t.Fatalf("Queued lookups continued after service failure: %v", got)
+	if got := client.counts(); got != [3]int{len(urls), 0, 0} {
+		t.Fatalf("Service failure prevented remaining lookups: %v", got)
+	}
+	entries := testReadEntries(t, path)
+	if entries[urls[0]].Status != "failed" || entries[urls[0]].Error == "" {
+		t.Fatalf("Service failure was not saved: %+v", entries[urls[0]])
+	}
+	for _, raw := range urls[1:] {
+		if entries[raw].Status != "archived" {
+			t.Errorf("Remaining URL was not processed: %s", raw)
+		}
 	}
 }
 
@@ -1064,7 +1137,7 @@ func TestRateLimitBeforeFirstResultRetainsGlobalCooldown(t *testing.T) {
 		t.Fatal("Expected rate limit")
 	}
 	stored := testReadDatabase(t, path)
-	if len(stored.Entries) != 0 || stored.RetryAfter != until.Format(time.RFC3339) {
+	if stored.Entries[url].Status != "failed" || stored.Entries[url].Error == "" || stored.RetryAfter != until.Format(time.RFC3339) {
 		t.Fatalf("First rate limit lost its global cooldown: %+v", stored)
 	}
 	resumed := &fakeArchiveService{availableFn: func(context.Context, string) (string, error) {
@@ -1336,9 +1409,7 @@ func TestConcurrentRateLimitsPreserveLongestCooldown(t *testing.T) {
 		if job == "job:"+urls[0] {
 			return capture{}, &serviceUnavailable{message: "First limit", retryAt: first}
 		}
-		// Model a longer Retry-After response arriving after another worker
-		// has already canceled the batch.
-		<-ctx.Done()
+		// Concurrent requests can return different retry deadlines.
 		return capture{}, &serviceUnavailable{message: "Longer limit", retryAt: longest}
 	}}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -1537,7 +1608,7 @@ func TestExpiredRefreshRetainsBackupUntilSuccessAndUpdatesAliases(t *testing.T) 
 	}
 }
 
-func TestFailedRefreshRetainsBackupAndDoesNotLoop(t *testing.T) {
+func TestFailedRefreshRetainsBackupAndRetriesOncePerRun(t *testing.T) {
 	ledger, path := newTestLedger(t)
 	raw := "https://example.com/page"
 	oldArchive := "https://web.archive.org/web/20100101000000/" + raw
@@ -1561,11 +1632,12 @@ func TestFailedRefreshRetainsBackupAndDoesNotLoop(t *testing.T) {
 	before, _ := os.ReadFile(path)
 	counts := client.counts()
 	if err := testRun(t, ledger, client, []string{raw}); !errors.Is(err, errIncomplete) {
-		t.Fatalf("Expected cached failed refresh: %v", err)
+		t.Fatalf("Expected retry of failed refresh: %v", err)
 	}
 	after, _ := os.ReadFile(path)
-	if client.counts() != counts || string(before) != string(after) {
-		t.Fatal("Failed refresh entered a repeat-request loop")
+	want := [3]int{counts[0] + 2, counts[1] + 1, counts[2] + 1}
+	if client.counts() != want || string(before) != string(after) {
+		t.Fatal("Failed refresh lost its backup or retried more than once")
 	}
 }
 
@@ -1601,8 +1673,9 @@ func TestRefreshSnapshotMustBeWithinServerDedupWindow(t *testing.T) {
 					t.Fatalf("Old snapshot incorrectly renewed backup: %+v, %v", entry, err)
 				}
 				counts := client.counts()
-				if err := testRun(t, ledger, client, []string{raw}); !errors.Is(err, errIncomplete) || client.counts() != counts {
-					t.Fatal("Rejected old snapshot entered a refresh loop")
+				want := [3]int{counts[0] + 1, counts[1] + 1, counts[2] + 1}
+				if err := testRun(t, ledger, client, []string{raw}); !errors.Is(err, errIncomplete) || client.counts() != want {
+					t.Fatal("Rejected old snapshot did not receive exactly one refresh attempt")
 				}
 			}
 		})
@@ -1630,7 +1703,7 @@ func TestPendingRefreshResumesWithoutAnotherSave(t *testing.T) {
 	}
 }
 
-func TestCanceledRefreshRetainsBackupWithoutResubmission(t *testing.T) {
+func TestCanceledRefreshRetriesWithoutLosingBackup(t *testing.T) {
 	ledger, path := newTestLedger(t)
 	raw := "https://example.com/page"
 	oldArchive := "https://web.archive.org/web/20100101000000/" + raw
@@ -1651,13 +1724,21 @@ func TestCanceledRefreshRetainsBackupWithoutResubmission(t *testing.T) {
 	if entry.Status != "submitting" || entry.ArchiveURL != oldArchive || entry.ExpiresAt != expired {
 		t.Fatalf("Canceled refresh lost its backup/checkpoint: %+v", entry)
 	}
-	resumed := &fakeArchiveService{availableFn: func(context.Context, string) (string, error) { return oldArchive, nil }}
-	if err := testRun(t, ledger, resumed, []string{raw}); !errors.Is(err, errIncomplete) {
-		t.Fatalf("Expected uncertain interrupted refresh: %v", err)
+	resumed := &fakeArchiveService{
+		availableFn: func(context.Context, string) (string, error) { return oldArchive, nil },
+		saveFn: func(context.Context, string) (capture, error) {
+			if got := testReadEntries(t, path)[raw]; got.ArchiveURL != oldArchive || got.ExpiresAt != expired {
+				t.Errorf("Retry discarded the previous backup: %+v", got)
+			}
+			return capture{JobID: "job:" + raw}, nil
+		},
+	}
+	if err := testRun(t, ledger, resumed, []string{raw}); err != nil {
+		t.Fatalf("Interrupted refresh did not retry: %v", err)
 	}
 	entry = testReadEntries(t, path)[raw]
-	if resumed.counts() != [3]int{1, 0, 0} || entry.ArchiveURL != oldArchive || entry.ExpiresAt != expired {
-		t.Fatalf("Interrupted refresh resubmitted or lost its backup: %+v, %v", entry, resumed.counts())
+	if resumed.counts() != [3]int{1, 1, 1} || entry.Status != "archived" || entry.ArchiveURL != testSnapshot(raw) {
+		t.Fatalf("Interrupted refresh did not save the fresh capture: %+v, %v", entry, resumed.counts())
 	}
 }
 
@@ -1709,7 +1790,7 @@ func TestPendingBackupWithoutRefreshStartCannotRenewFromOldSnapshot(t *testing.T
 	}
 }
 
-func TestExplicitRefreshRetryResetsOldFreshnessBoundary(t *testing.T) {
+func TestAutomaticRefreshRetryResetsOldFreshnessBoundary(t *testing.T) {
 	ledger, path := newTestLedger(t)
 	raw := "https://example.com/page"
 	oldTimestamp := testNow.Add(-24 * time.Hour).Format("20060102150405")
@@ -1726,12 +1807,12 @@ func TestExplicitRefreshRetryResetsOldFreshnessBoundary(t *testing.T) {
 		availableFn: func(context.Context, string) (string, error) { return oldArchive, nil },
 		saveFn: func(context.Context, string) (capture, error) {
 			if stored := testReadEntries(t, path)[raw]; stored.RefreshStartedAt != testNow.Format(time.RFC3339) {
-				t.Errorf("Explicit retry retained an obsolete freshness boundary: %+v", stored)
+				t.Errorf("Automatic retry retained an obsolete freshness boundary: %+v", stored)
 			}
 			return capture{JobID: "job:" + raw}, nil
 		},
 	}
-	r := runner{ledger: ledger, client: client, now: fixedTestTime, retryFailed: true, concurrency: 1}
+	r := runner{ledger: ledger, client: client, now: fixedTestTime, concurrency: 1}
 	if err := r.run(context.Background(), []string{raw}); err != nil {
 		t.Fatal(err)
 	}
@@ -1740,7 +1821,7 @@ func TestExplicitRefreshRetryResetsOldFreshnessBoundary(t *testing.T) {
 	}
 	stored := testReadEntries(t, path)[raw]
 	if stored.Status != "archived" || stored.ArchiveURL != testSnapshot(raw) || stored.ExpiresAt != expiryAfterSixMonths(testNow).Format(time.RFC3339) {
-		t.Fatalf("Explicit retry did not renew from the fresh capture: %+v", stored)
+		t.Fatalf("Automatic retry did not renew from the fresh capture: %+v", stored)
 	}
 }
 
@@ -1839,8 +1920,8 @@ func TestDeferredAuthenticationDoesNotHideOtherFailures(t *testing.T) {
 	if err := testRun(t, ledger, client, []string{blocked, failed}); !errors.Is(err, errIncomplete) {
 		t.Fatalf("Authentication deferral hid an actual failed capture: %v", err)
 	}
-	if client.counts() != [3]int{} {
-		t.Fatal("Cached failures caused requests")
+	if client.counts() != [3]int{1, 0, 0} || !reflect.DeepEqual(client.availableCalls, []string{failed}) {
+		t.Fatal("Failed capture was not rechecked, or was submitted without credentials")
 	}
 }
 

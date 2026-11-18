@@ -1,6 +1,6 @@
 // Archive external blog links and retain their Wayback URLs in xoutlinks/db.json.
 // Run from the blog root: ./xoutlinks/run.sh
-// Failed links are only retried with --retry-failed. Archives expire after six
+// Failed links are retried by default. Archives expire after six
 // months; fresh entries are skipped and pending jobs resume without resubmission.
 // Set ARCHIVE_ORG_ACCESS_KEY and ARCHIVE_ORG_SECRET_KEY before saving new pages.
 // Entries waiting for credentials resume automatically when credentials exist.
@@ -39,6 +39,7 @@ var archivePattern = regexp.MustCompile(`^https?://web\.archive\.org/web/([0-9]{
 var errIncomplete = errors.New("some links are not archived; see xoutlinks/db.json")
 
 const databaseVersion = 1
+const blockedURLError = "error:blocked-url"
 
 type database struct {
 	Version    int              `json:"version"`
@@ -231,6 +232,9 @@ func loadLedgerAt(path string, now time.Time) (*Ledger, error) {
 		if entry.Status == "archived" && entry.Error != "" {
 			entry.Error = ""
 			rewrite = true
+		} else if entry.Error == blockedURLError && entry.Status != "blocked" {
+			entry.Status, entry.JobID = "blocked", ""
+			rewrite = true
 		}
 		l.data[raw] = entry
 	}
@@ -294,6 +298,8 @@ func (l *Ledger) put(base string, aliases []string, entry Entry) error {
 	entry.RetryAfter = ""
 	if entry.Status == "archived" {
 		entry.Error = ""
+	} else if entry.Error == blockedURLError {
+		entry.Status, entry.JobID = "blocked", ""
 	}
 	var updated map[string]Entry
 	for raw := range l.data {
@@ -729,7 +735,6 @@ type runner struct {
 	ledger       *Ledger
 	client       archiveService
 	concurrency  int
-	retryFailed  bool
 	pollInterval time.Duration
 	output       io.Writer
 	outputMu     sync.Mutex
@@ -778,9 +783,7 @@ func (r *runner) printRateLimit(until time.Time) {
 }
 
 func parallel(ctx context.Context, items []work, count int, fn func(context.Context, work) error) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	failures := make(chan error, count)
+	failures := make(chan error, len(items))
 	var next atomic.Int64
 	var workers sync.WaitGroup
 	for i := 0; i < count; i++ {
@@ -793,36 +796,35 @@ func parallel(ctx context.Context, items []work, count int, fn func(context.Cont
 					return
 				}
 				if err := fn(ctx, items[i]); err != nil {
-					failures <- err // Each worker reports at most one error.
-					cancel()
-					return
+					failures <- err
 				}
 			}
 		}()
 	}
 	workers.Wait()
 	close(failures)
-	var first error
+	var collected []error
 	var longest *serviceUnavailable
+	longestIndex := 0
 	for err := range failures {
-		if first == nil {
-			first = err
-		}
+		collected = append(collected, err)
 		var unavailable *serviceUnavailable
 		if errors.As(err, &unavailable) && !unavailable.retryAt.IsZero() && (longest == nil || unavailable.retryAt.After(longest.retryAt)) {
 			longest = unavailable
+			longestIndex = len(collected) - 1
 		}
 	}
 	if longest != nil {
-		return longest
+		// The runner persists the first rate limit it finds in the joined error.
+		collected[0], collected[longestIndex] = collected[longestIndex], collected[0]
 	}
-	if first != nil {
-		return first
-	}
-	return ctx.Err()
+	return errors.Join(append(collected, ctx.Err())...)
 }
 
 func (r *runner) recover(ctx context.Context, item work, fallback Entry) error {
+	if fallback.Error == blockedURLError {
+		return r.store(item, fallback)
+	}
 	archive, err := r.client.available(ctx, item.base)
 	if err != nil {
 		return err
@@ -906,6 +908,14 @@ func (r *runner) fail(item work, status string, err error) error {
 func (r *runner) process(ctx context.Context, item work) (err error) {
 	defer func() {
 		if err != nil {
+			if ctx.Err() == nil {
+				entry, found := r.ledger.record(item.base)
+				if !found {
+					entry.Status = "failed"
+				}
+				entry.Error = err.Error()
+				err = errors.Join(err, r.store(item, entry))
+			}
 			err = fmt.Errorf("%s: %w", item.base, err)
 			return
 		}
@@ -936,13 +946,10 @@ func (r *runner) process(ctx context.Context, item work) (err error) {
 		}
 	case "ready", "pending":
 	default:
-		if !r.retryFailed && entry.Status != "" && entry.Status != "submitting" && entry.Status != "unchecked" {
-			return r.store(item, entry)
-		}
 		lookup = true
 	}
 	if entry.ArchiveURL != "" && entryExpired(entry, r.currentTime()) &&
-		(entry.RefreshStartedAt == "" || (r.retryFailed && entry.Status == "failed")) {
+		(entry.RefreshStartedAt == "" || entry.Status == "failed") {
 		entry.RefreshStartedAt = r.currentTime().Format(time.RFC3339)
 	}
 	item.entry = entry
@@ -955,9 +962,6 @@ func (r *runner) process(ctx context.Context, item work) (err error) {
 		if archive != "" && r.acceptsArchive(entry, archive) {
 			r.printf("%s: found: %s\n", item.base, archive)
 			return r.store(item, r.archivedEntry(archive))
-		}
-		if entry.Status == "submitting" && !r.retryFailed {
-			return r.fail(item, "uncertain", errors.New("interrupted submission; no capture found. Use --retry-failed to retry explicitly."))
 		}
 		entry = transition(entry, "ready")
 		if entry.ArchiveURL != "" {
@@ -1017,6 +1021,10 @@ func (r *runner) run(ctx context.Context, urls []string) (runError error) {
 	var items []work
 	for _, base := range sortedKeys(groups) {
 		entry, _ := r.ledger.record(base)
+		if entry.Status == "blocked" {
+			delete(groups, base)
+			continue
+		}
 		items = append(items, work{base, groups[base], entry})
 		urls = append(urls, groups[base]...)
 	}
@@ -1060,8 +1068,9 @@ func (r *runner) run(ctx context.Context, urls []string) (runError error) {
 	if count <= 0 {
 		count = 3
 	}
-	if err := parallel(ctx, items, count, r.process); err != nil {
-		return err
+	runError = parallel(ctx, items, count, r.process)
+	if ctx.Err() != nil {
+		return runError
 	}
 	counts := make(map[string]int)
 	for _, raw := range urls {
@@ -1076,11 +1085,11 @@ func (r *runner) run(ctx context.Context, urls []string) (runError error) {
 	r.printf("%d links, %d distinct pages: %s\n", len(urls), len(groups), strings.Join(summary, ", "))
 	if counts["archived"] != len(urls) {
 		if counts["needs_auth"] > 0 {
-			return fmt.Errorf("%w; valid Internet Archive credentials are required", errIncomplete)
+			return errors.Join(runError, fmt.Errorf("%w; valid Internet Archive credentials are required", errIncomplete))
 		}
-		return errIncomplete
+		return errors.Join(runError, errIncomplete)
 	}
-	return nil
+	return runError
 }
 
 func main() {
@@ -1093,7 +1102,6 @@ func main() {
 		defaultRoot = strings.TrimSpace(string(output))
 	}
 	root := flag.String("root", defaultRoot, "blog repository directory")
-	retry := flag.Bool("retry-failed", false, "explicitly retry unsuccessful links")
 	concurrency := flag.Int("concurrency", 3, "maximum simultaneous capture jobs")
 	credentials := flag.String("credentials", "", "private JSON file containing access_key and secret_key")
 	explain := flag.String("explain", "", "explain whether a URL is excluded without making archive requests")
@@ -1134,7 +1142,7 @@ func main() {
 		if err != nil {
 			return err
 		}
-		r := runner{ledger: ledger, client: client, concurrency: *concurrency, retryFailed: *retry, pollInterval: 10 * time.Second, output: os.Stdout}
+		r := runner{ledger: ledger, client: client, concurrency: *concurrency, pollInterval: 10 * time.Second, output: os.Stdout}
 		return r.run(ctx, urls)
 	}()
 	if err != nil {
