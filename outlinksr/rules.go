@@ -36,10 +36,14 @@ var exclusionSettings = rulesConfig{
 		"messenger.com", "m.me", "zoom.us",
 	},
 	Paths: []pathRule{
-		{Host: "github.com", Path: "/nhooyr", IgnoreCase: true},
+		{Host: "github.com", Path: "/nhooyr"},
 		{Host: "chatgpt.com", Path: "/u"},
-		{Host: "stackexchange.com", Path: "/users", Subdomains: true},
-		{Host: "stackoverflow.com", Path: "/users"},
+	},
+	QueryTokens: []queryTokenRule{
+		{
+			Host: "github.com", Path: "/search", Key: "q",
+			Tokens: []string{"involves:nhooyr"},
+		},
 	},
 }
 
