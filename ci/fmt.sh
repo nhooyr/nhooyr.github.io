@@ -8,6 +8,7 @@ fi
 
 npx prettier -w --print-width=110 --no-semi --bracket-same-line .
 shfmt -s -w .
+gofmt -s -w .
 
 if [ "${CI-}" ]; then
 	git add --intent-to-add --ignore-removal .
