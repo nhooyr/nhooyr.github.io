@@ -117,7 +117,9 @@
       "expires_at": "2027-05-18T08:26:41Z"
     },
     "https://us05web.zoom.us/j/8652767772?pwd=asTk9R4dmB9JFzZmsxspdtOWtlW68b.1": {
-      "status": "submitting"
+      "status": "blocked",
+      "error": "error:no-request",
+      "error_msg": "The target server blocks access to https://us05web.zoom.us/j/8652767772?pwd=asTk9R4dmB9JFzZmsxspdtOWtlW68b.1. (HTTP status=403)"
     },
     "https://wa.me/aqsnow0?s=p": {
       "status": "archived",
@@ -165,8 +167,9 @@
       "expires_at": "2027-05-18T10:21:47Z"
     },
     "https://www.flickr.com/people/aqsnow/": {
-      "status": "pending",
-      "job_id": "spn2-183c3ed0b90ea7141004132a5dcdf7820d963b9a"
+      "status": "archived",
+      "archive_url": "https://web.archive.org/web/20261118103922/https://www.flickr.com/people/aqsnow/",
+      "expires_at": "2027-05-18T10:39:37Z"
     },
     "https://www.instagram.com/aqsnow0": {
       "status": "blocked",
@@ -178,8 +181,9 @@
       "expires_at": "2027-05-18T08:26:41Z"
     },
     "https://www.linkedin.com/in/aqsnow/": {
-      "status": "pending",
-      "job_id": "spn2-dd90a13cd9db49018881dcee7f6318ad32ce697b"
+      "status": "blocked",
+      "error": "error:no-request",
+      "error_msg": "The target server cannot find https://www.linkedin.com/in/aqsnow/. (HTTP status=403)"
     },
     "https://www.mississauga.com/news/young-entrepreneurs-put-wares-to-the-test-at-trade-show/article_fc942f8e-56b0-5ce3-8d39-8887c4da6e9c.html": {
       "status": "archived",
@@ -196,10 +200,32 @@
       "archive_url": "https://web.archive.org/web/20260720161339/https://www.nfpa.org/codes-and-standards/nfpa-1002-standard-development/1002",
       "expires_at": "2027-05-18T08:26:41Z"
     },
+    "https://www.pinterest.com/aqsnow": {
+      "status": "archived",
+      "archive_url": "https://web.archive.org/web/20261118104505/https://www.pinterest.com/aqsnow/",
+      "expires_at": "2027-05-18T10:45:20Z"
+    },
+    "https://www.reddit.com/user/aqsnow/": {
+      "status": "pending",
+      "job_id": "spn2-7d24602b9c18439a9f218038451e2c4781473974"
+    },
     "https://www.rescuecanada.ca/course-category/swiftwater": {
       "status": "archived",
       "archive_url": "https://web.archive.org/web/20261118081740/https://www.rescuecanada.ca/course-category/swiftwater",
       "expires_at": "2027-05-18T08:26:41Z"
+    },
+    "https://www.threads.com/@aqsnow0": {
+      "status": "pending",
+      "job_id": "spn2-a5b0d81038beda06113a3dfed4258bdf07b22733"
+    },
+    "https://www.tiktok.com/@aqsnow00": {
+      "status": "archived",
+      "archive_url": "https://web.archive.org/web/20261011133107/https://www.tiktok.com/@aqsnow00",
+      "expires_at": "2027-05-18T10:45:24Z"
+    },
+    "https://www.youtube.com/@aqsnow0": {
+      "status": "pending",
+      "job_id": "spn2-e047f85b7c432faab90f6e9e16dc6cc03cf47e14"
     },
     "https://www2.gov.bc.ca/gov/content/health/about-bc-s-health-care-system/partners/colleges-boards-and-commissions/emergency-medical-assistants-licensing-board/licensing": {
       "status": "archived",
