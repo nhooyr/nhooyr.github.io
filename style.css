@@ -12,6 +12,12 @@ h1 {
   margin: 1rem 0;
 }
 
+h1 > a,
+h2 > a {
+  color: inherit;
+  text-decoration: none;
+}
+
 h2,
 main:first-child > h1:first-child,
 article > h1:first-child {
