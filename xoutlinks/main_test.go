@@ -1,19 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"sort"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,2794 +21,980 @@ import (
 	"time"
 )
 
-const testTimestamp = "20261118123456"
-
-var testNow = time.Date(2026, 11, 18, 12, 34, 56, 0, time.UTC)
-
-func fixedTestTime() time.Time { return testNow }
-
-func testSnapshot(url string) string {
-	return "https://web.archive.org/web/" + testTimestamp + "/" + url
+type fakeSaver struct {
+	mu           sync.Mutex
+	preparations int
+	calls        []string
+	saveFn       func(context.Context, string, string) error
 }
 
-type fakeArchiveService struct {
-	mu              sync.Mutex
-	unauthenticated bool
-	availableCalls  []string
-	saveCalls       []string
-	forceCalls      []bool
-	statusCalls     []string
-	availableFn     func(context.Context, string) (string, error)
-	verifyFn        func(context.Context, string) error
-	saveFn          func(context.Context, string) (capture, error)
-	statusFn        func(context.Context, string) (capture, error)
-}
-
-func (f *fakeArchiveService) authenticated() bool { return !f.unauthenticated }
-
-func (f *fakeArchiveService) available(ctx context.Context, url string) (string, error) {
-	f.mu.Lock()
-	f.availableCalls = append(f.availableCalls, url)
-	f.mu.Unlock()
-	if f.availableFn != nil {
-		return f.availableFn(ctx, url)
-	}
-	return "", nil
-}
-
-func (f *fakeArchiveService) verifyReplay(ctx context.Context, archive string) error {
-	if f.verifyFn != nil {
-		return f.verifyFn(ctx, archive)
-	}
+func (s *fakeSaver) prepare(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.preparations++
 	return nil
 }
 
-func (f *fakeArchiveService) save(ctx context.Context, url string, force bool) (capture, error) {
-	f.mu.Lock()
-	f.saveCalls = append(f.saveCalls, url)
-	f.forceCalls = append(f.forceCalls, force)
-	f.mu.Unlock()
-	if f.saveFn != nil {
-		return f.saveFn(ctx, url)
+func (s *fakeSaver) save(ctx context.Context, raw, path string) error {
+	s.mu.Lock()
+	s.calls = append(s.calls, raw)
+	s.mu.Unlock()
+	if s.saveFn != nil {
+		return s.saveFn(ctx, raw, path)
 	}
-	return capture{JobID: "job:" + url}, nil
+	return os.WriteFile(path, []byte("<!doctype html><p>saved page</p>"), 0644)
 }
 
-func (f *fakeArchiveService) status(ctx context.Context, job string) (capture, error) {
-	f.mu.Lock()
-	f.statusCalls = append(f.statusCalls, job)
-	f.mu.Unlock()
-	if f.statusFn != nil {
-		return f.statusFn(ctx, job)
-	}
-	return capture{
-		Status: "success", Timestamp: testTimestamp,
-		OriginalURL: strings.TrimPrefix(job, "job:"),
-	}, nil
+func (s *fakeSaver) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.calls)
 }
 
-func (f *fakeArchiveService) counts() [3]int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return [3]int{len(f.availableCalls), len(f.saveCalls), len(f.statusCalls)}
-}
-
-func newTestLedger(t *testing.T) (*Ledger, string) {
+func newTestRunner(t *testing.T) (*runner, *fakeSaver) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "db.json")
-	ledger, err := loadLedgerAt(path, testNow)
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "xoutlinks"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := loadLedger(filepath.Join(root, "xoutlinks", "db.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return ledger, path
+	saver := &fakeSaver{}
+	return &runner{root: root, backups: "backups", ledger: ledger, saver: saver, concurrency: 3}, saver
 }
 
-func testRun(t *testing.T, ledger *Ledger, client archiveService, urls []string) error {
+func putEntry(t *testing.T, r *runner, raw string, entry Entry) {
 	t.Helper()
-	r := runner{ledger: ledger, client: client, now: fixedTestTime, concurrency: 3}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	return r.run(ctx, urls)
+	base, _ := splitFragment(raw)
+	if err := r.ledger.put(base, []string{raw}, entry); err != nil {
+		t.Fatal(err)
+	}
 }
 
-func testReadDatabase(t *testing.T, path string) database {
+func readFile(t *testing.T, path string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var stored database
-	if err := json.Unmarshal(data, &stored); err != nil {
-		t.Fatal(err)
-	}
-	if stored.Version != databaseVersion || stored.Entries == nil {
-		t.Fatalf("Expected a version %d database", databaseVersion)
-	}
-	return stored
+	return data
 }
 
-func testReadEntries(t *testing.T, path string) map[string]Entry {
-	t.Helper()
-	return testReadDatabase(t, path).Entries
-}
-
-func TestRepeatRunMakesNoRequestsOrFileChanges(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	url := "https://example.com/page"
-	client := &fakeArchiveService{}
-	if err := testRun(t, ledger, client, []string{url}); err != nil {
+func TestIncrementalBackups(t *testing.T) {
+	r, saver := newTestRunner(t)
+	urls := []string{"https://example.com/a#one", "https://example.com/a#two", "https://example.com/b?q=1"}
+	if err := r.run(context.Background(), urls); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.ReadFile(path)
+	if saver.count() != 2 {
+		t.Fatalf("saved %d pages instead of two distinct URLs", saver.count())
+	}
+	entry := r.ledger.record("https://example.com/a")
+	if entry.Status != "saved" || entry.File == "" || entry.SavedAt == "" || entry.PendingFile != "" {
+		t.Fatalf("incomplete saved entry: %+v", entry)
+	}
+	before := readFile(t, r.ledger.path)
+	info, _ := os.Stat(r.ledger.path)
+	r.saver = nil // A completed run must not even prepare Chrome or SingleFile.
+	if err := r.run(context.Background(), append(urls, "https://example.com/a#three")); err != nil {
+		t.Fatal(err)
+	}
+	afterAlias := readFile(t, r.ledger.path)
+	if bytes.Equal(before, afterAlias) {
+		t.Fatal("new alias was not recorded")
+	}
+	if got := r.ledger.data["https://example.com/a#three"].File; got != entry.File {
+		t.Fatalf("new fragment did not reuse the backup: %q", got)
+	}
+	info, _ = os.Stat(r.ledger.path)
+	if err := r.run(context.Background(), append(urls, "https://example.com/a#three")); err != nil {
+		t.Fatal(err)
+	}
+	afterInfo, _ := os.Stat(r.ledger.path)
+	if !bytes.Equal(afterAlias, readFile(t, r.ledger.path)) || !info.ModTime().Equal(afterInfo.ModTime()) {
+		t.Fatal("repeat run changed the database")
+	}
+	r.saver = saver
+	if err := r.run(context.Background(), append(urls, "https://example.com/new")); err != nil {
+		t.Fatal(err)
+	}
+	if saver.count() != 3 {
+		t.Fatalf("new run did unnecessary captures: %v", saver.calls)
+	}
+}
+
+func TestMissingBackupIsSavedAgain(t *testing.T) {
+	r, saver := newTestRunner(t)
+	raw := "https://example.com/"
+	if err := r.run(context.Background(), []string{raw}); err != nil {
+		t.Fatal(err)
+	}
+	entry := r.ledger.record(raw)
+	if err := os.Remove(filepath.Join(r.root, entry.File)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.run(context.Background(), []string{raw}); err != nil {
+		t.Fatal(err)
+	}
+	if saver.count() != 2 {
+		t.Fatal("missing local backup was skipped")
+	}
+}
+
+func TestConfiguredBackupDirectoryPreservesResume(t *testing.T) {
+	r, _ := newTestRunner(t)
+	r.backups = "xoutlinks/backups"
+	raw := "https://example.com/"
+	if err := r.run(context.Background(), []string{raw}); err != nil {
+		t.Fatal(err)
+	}
+	entry := r.ledger.record(raw)
+	if !strings.HasPrefix(entry.File, "xoutlinks/backups/") {
+		t.Fatalf("saved outside the configured directory: %s", entry.File)
+	}
+	before := readFile(t, r.ledger.path)
+	ledger, err := loadLedger(r.ledger.path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	counts := client.counts()
-	if err := testRun(t, ledger, client, []string{url}); err != nil {
+	r.ledger, r.saver = ledger, nil
+	if err := r.run(context.Background(), []string{raw}); err != nil {
 		t.Fatal(err)
 	}
-	after, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if counts != client.counts() || string(before) != string(after) {
-		t.Fatalf("Repeat run did work: calls %v -> %v, changed bytes: %v", counts, client.counts(), string(before) != string(after))
+	if !bytes.Equal(before, readFile(t, r.ledger.path)) {
+		t.Fatal("resuming a configured directory changed the database")
 	}
 }
 
-func TestArchivedEntriesNeverExpire(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	raw := "https://example.com/old"
-	entry := Entry{Status: "archived", ArchiveURL: "https://web.archive.org/web/20100101000000/" + raw}
-	if err := ledger.put(raw, []string{raw}, entry); err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeArchiveService{verifyFn: func(context.Context, string) error {
-		t.Error("Completed archive was checked again")
-		return nil
-	}}
-	r := runner{ledger: ledger, client: client, now: func() time.Time { return testNow.AddDate(100, 0, 0) }}
-	if err := r.run(context.Background(), []string{raw}); err != nil || client.counts() != [3]int{} {
-		t.Fatalf("Completed archive expired: %v, %v", err, client.counts())
-	}
-	after, err := os.ReadFile(path)
-	if err != nil || string(before) != string(after) {
-		t.Fatalf("Completed archive was rewritten: %v", err)
-	}
-}
-
-func TestForceRearchiveOverridesSavedState(t *testing.T) {
-	for _, status := range []string{"archived", "blocked", "failed", "pending", "replay_pending", "needs_auth"} {
-		t.Run(status, func(t *testing.T) {
-			ledger, path := newTestLedger(t)
-			raw := "https://example.com/forced"
-			entry := Entry{Status: status, ArchiveURL: "https://web.archive.org/web/20100101000000/" + raw, ForceRearchive: true}
-			if status == "blocked" {
-				entry.Error = blockedURLError
-			} else if status == "pending" {
-				entry.JobID = "old-job"
-			} else if status == "failed" || status == "replay_pending" {
-				entry.ErrorMsg = "previous failure"
-				entry.RetryAt = testNow.Add(time.Hour).Format(time.RFC3339)
-			}
-			if err := ledger.put(raw, []string{raw}, entry); err != nil {
-				t.Fatal(err)
-			}
-			client := &fakeArchiveService{saveFn: func(context.Context, string) (capture, error) {
-				stored := testReadEntries(t, path)[raw]
-				if stored.Status != "submitting" || !stored.ForceRearchive || stored.RearchiveStartedAt == "" || stored.ArchiveURL != entry.ArchiveURL {
-					t.Errorf("Forced save lost its checkpoint or previous snapshot: %+v", stored)
-				}
-				return capture{JobID: "job:" + raw}, nil
-			}}
-			if err := testRun(t, ledger, client, []string{raw}); err != nil {
-				t.Fatal(err)
-			}
-			if client.counts() != [3]int{0, 1, 1} || !reflect.DeepEqual(client.forceCalls, []bool{true}) {
-				t.Fatalf("Forced save reused a capture or skipped submission: %v, %v", client.counts(), client.forceCalls)
-			}
-			stored := testReadEntries(t, path)[raw]
-			if stored.Status != "archived" || stored.ArchiveURL != testSnapshot(raw) || stored.ForceRearchive || stored.RearchiveStartedAt != "" || stored.Error != "" || stored.ErrorMsg != "" || stored.RetryAt != "" {
-				t.Fatalf("Forced save did not finish cleanly: %+v", stored)
-			}
-			if err := testRun(t, ledger, client, []string{raw}); err != nil || client.counts() != [3]int{0, 1, 1} {
-				t.Fatalf("Completed forced save was repeated: %v, %v", err, client.counts())
-			}
-		})
-	}
-}
-
-func TestForceRearchiveOnFragmentOverridesArchivedBase(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	base := "https://example.com/page"
-	fragment := base + "#section"
-	entries := map[string]Entry{
-		base:     {Status: "archived", ArchiveURL: "https://web.archive.org/web/20100101000000/" + base},
-		fragment: {Status: "archived", ArchiveURL: "https://web.archive.org/web/20100101000000/" + fragment, ForceRearchive: true},
-	}
-	if err := writeJSON(path, database{Version: databaseVersion, Entries: entries}); err != nil {
-		t.Fatal(err)
-	}
-	ledger, err := loadLedgerAt(path, testNow)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeArchiveService{}
-	if err := testRun(t, ledger, client, []string{base, fragment}); err != nil {
-		t.Fatal(err)
-	}
-	if client.counts() != [3]int{0, 1, 1} || !reflect.DeepEqual(client.forceCalls, []bool{true}) {
-		t.Fatalf("Fragment flag was ignored or duplicated captures: %v, %v", client.counts(), client.forceCalls)
-	}
-	for raw, entry := range testReadEntries(t, path) {
-		if entry.ArchiveURL != testSnapshot(raw) || entry.ForceRearchive || entry.RearchiveStartedAt != "" {
-			t.Errorf("Alias did not receive the refreshed snapshot: %s: %+v", raw, entry)
-		}
-	}
-}
-
-func TestForceRearchiveResumesAfterCancellation(t *testing.T) {
-	for _, phase := range []string{"pending", "replay_pending"} {
-		t.Run(phase, func(t *testing.T) {
-			ledger, path := newTestLedger(t)
-			raw := "https://example.com/forced"
-			if err := ledger.put(raw, []string{raw}, Entry{Status: "archived", ArchiveURL: testSnapshot(raw), ForceRearchive: true}); err != nil {
-				t.Fatal(err)
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			client := &fakeArchiveService{
-				statusFn: func(context.Context, string) (capture, error) {
-					if phase == "pending" {
-						cancel()
-						return capture{}, context.Canceled
-					}
-					return capture{Status: "success", Timestamp: testTimestamp, OriginalURL: raw}, nil
-				},
-				verifyFn: func(context.Context, string) error { cancel(); return context.Canceled },
-			}
-			r := runner{ledger: ledger, client: client, now: fixedTestTime, concurrency: 1}
-			if err := r.run(ctx, []string{raw}); !errors.Is(err, context.Canceled) {
-				t.Fatalf("Forced capture did not stop on cancellation: %v", err)
-			}
-			saved := testReadEntries(t, path)[raw]
-			if saved.Status != phase || !saved.ForceRearchive || saved.RearchiveStartedAt == "" {
-				t.Fatalf("Cancellation lost the forced-capture checkpoint: %+v", saved)
-			}
-			loaded, err := loadLedgerAt(path, testNow)
-			if err != nil {
-				t.Fatal(err)
-			}
-			resumed := &fakeArchiveService{}
-			if err := testRun(t, loaded, resumed, []string{raw}); err != nil {
-				t.Fatal(err)
-			}
-			want := [3]int{}
-			if phase == "pending" {
-				want[2] = 1
-			}
-			if resumed.counts() != want || testReadEntries(t, path)[raw].ForceRearchive {
-				t.Fatalf("Resume resubmitted the forced capture or retained the flag: %v", resumed.counts())
-			}
-		})
-	}
-}
-
-func TestForcedCaptureRejectsOldSnapshots(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	raw := "https://example.com/forced"
-	old := "https://web.archive.org/web/20100101000000/" + raw
-	if err := ledger.put(raw, []string{raw}, Entry{Status: "archived", ArchiveURL: old, ForceRearchive: true}); err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeArchiveService{statusFn: func(context.Context, string) (capture, error) {
-		return capture{Status: "success", Timestamp: "20100101000000", OriginalURL: raw}, nil
-	}}
-	if err := testRun(t, ledger, client, []string{raw}); !errors.Is(err, errIncomplete) {
-		t.Fatalf("Forced capture accepted the old snapshot: %v", err)
-	}
-	if entry := testReadEntries(t, path)[raw]; !entry.ForceRearchive || entry.RearchiveStartedAt == "" || entry.ArchiveURL != old {
-		t.Fatalf("Failed forced capture lost its request or previous snapshot: %+v", entry)
-	}
-	resumed := &fakeArchiveService{availableFn: func(context.Context, string) (string, error) { return old, nil }}
-	if err := testRun(t, ledger, resumed, []string{raw}); err != nil || resumed.counts() != [3]int{1, 1, 1} || !reflect.DeepEqual(resumed.forceCalls, []bool{true}) {
-		t.Fatalf("Retry reused an old indexed snapshot: %v, %v, %v", err, resumed.counts(), resumed.forceCalls)
-	}
-}
-
-func TestForcedCaptureWaitsForCredentialsAndStopsWhenBlocked(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	raw := "https://example.com/forced"
-	if err := ledger.put(raw, []string{raw}, Entry{Status: "archived", ArchiveURL: testSnapshot(raw), ForceRearchive: true}); err != nil {
-		t.Fatal(err)
-	}
-	anonymous := &fakeArchiveService{unauthenticated: true}
-	if err := testRun(t, ledger, anonymous, []string{raw}); !errors.Is(err, errIncomplete) {
-		t.Fatalf("Missing credentials did not defer the forced capture: %v", err)
-	}
-	entry := testReadEntries(t, path)[raw]
-	if entry.Status != "needs_auth" || !entry.ForceRearchive || entry.RearchiveStartedAt != "" || anonymous.counts() != [3]int{} {
-		t.Fatalf("Missing credentials consumed the forced request: %+v", entry)
-	}
-	client := &fakeArchiveService{saveFn: func(context.Context, string) (capture, error) {
-		return capture{Status: "error", StatusExt: "error:blocked", Message: "The target site is blocking us."}, nil
-	}}
-	if err := testRun(t, ledger, client, []string{raw}); !errors.Is(err, errIncomplete) {
-		t.Fatalf("Permanent failure did not report the blocked capture: %v", err)
-	}
-	entry = testReadEntries(t, path)[raw]
-	if entry.Status != "blocked" || entry.ForceRearchive || entry.RearchiveStartedAt != "" || entry.RetryAt != "" {
-		t.Fatalf("Permanent failure retained an automatic forced retry: %+v", entry)
-	}
-	if err := testRun(t, ledger, client, []string{raw}); err != nil || client.counts() != [3]int{0, 1, 0} {
-		t.Fatalf("Blocked forced capture was retried: %v, %v", err, client.counts())
-	}
-}
-
-func TestOnlyNewLinksDoWork(t *testing.T) {
-	ledger, _ := newTestLedger(t)
-	old, newURL := "https://example.com/old", "https://example.com/new?meaningful=value"
-	client := &fakeArchiveService{}
-	if err := testRun(t, ledger, client, []string{old}); err != nil {
-		t.Fatal(err)
-	}
-	if err := testRun(t, ledger, client, []string{old, newURL}); err != nil {
-		t.Fatal(err)
-	}
-	if got := client.counts(); got != [3]int{2, 2, 2} {
-		t.Fatalf("Old link was processed again: %v", got)
-	}
-	if !reflect.DeepEqual(client.saveCalls, []string{old, newURL}) {
-		t.Fatalf("Unexpected saves: %v", client.saveCalls)
-	}
-}
-
-func TestFragmentsShareCaptureAndNewFragmentReusesIt(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	base := "https://example.com/page?q=a%2Bb&x=kept"
-	urls := []string{base + "#one", base + "#two"}
-	client := &fakeArchiveService{}
-	if err := testRun(t, ledger, client, urls); err != nil {
-		t.Fatal(err)
-	}
-	if got := client.counts(); got != [3]int{1, 1, 1} {
-		t.Fatalf("Fragment aliases did not share a capture: %v", got)
-	}
-	urls = append(urls, base+"#three")
-	if err := testRun(t, ledger, client, urls); err != nil {
-		t.Fatal(err)
-	}
-	if got := client.counts(); got != [3]int{1, 1, 1} {
-		t.Fatalf("New fragment performed unnecessary network work: %v", got)
-	}
-	entries := testReadEntries(t, path)
-	for _, url := range urls {
-		if got := entries[url]; got.Status != "archived" || got.ArchiveURL != testSnapshot(url) {
-			t.Errorf("Incorrect fragment result for %s: %+v", url, got)
-		}
-	}
-}
-
-func TestHTMLExtractionPreservesQueryAndDecodesEntities(t *testing.T) {
-	content := `<a href="https://example.com/search?q=a%2Bb&amp;next=https%3A%2F%2Fexample.net#results">one</a>
-<a href='https://example.com/search?q=a%2Bb&amp;next=https%3A%2F%2Fexample.net#results'>duplicate</a>
-<a href=" https://example.org/other ">other</a>
-<a href="/local">local</a><a href="mailto:test@example.com">mail</a>
-<link href="https://example.com/style.css" rel="stylesheet">`
-	got := extractLinks(content)
-	sort.Strings(got)
-	want := []string{
-		"https://example.com/search?q=a%2Bb&next=https%3A%2F%2Fexample.net#results",
-		"https://example.org/other",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("Unexpected extracted URLs: %v", got)
-	}
-}
-
-func TestExcludedLinksDatabaseIsSortedUniqueAndStable(t *testing.T) {
+func TestBackupDirectoryRelativeToWorkingDirectory(t *testing.T) {
 	root := t.TempDir()
-	command := exec.Command("git", "init", "-q", root)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("Initialize test repository: %v: %s", err, output)
-	}
-	if err := os.MkdirAll(filepath.Join(root, "xoutlinks"), 0700); err != nil {
+	directory := filepath.Join(root, "xoutlinks")
+	if err := os.Mkdir(directory, 0755); err != nil {
 		t.Fatal(err)
 	}
-	pages := map[string]string{
-		"index.html": `<a href="https://en.wikipedia.org/wiki/Example">wiki</a>
-<a href="https://example.org/article">article</a>
-<a href="https://github.com/nhooyr/nhooyr.github.io">source</a><a href="/local">local</a>`,
-		"more.html": `<a href="https://en.wikipedia.org/wiki/Example">duplicate</a>
-<a href="https://github.com/nhooyr/nhooyr.github.io?tab=readme&amp;x=1">source</a>`,
+	t.Chdir(directory)
+	got, err := backupDirectory(root, "./backups")
+	if err != nil || got != "xoutlinks/backups" {
+		t.Fatalf("relative directory resolved to %q: %v", got, err)
 	}
-	for name, content := range pages {
-		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0600); err != nil {
-			t.Fatal(err)
+	for _, invalid := range []string{root, filepath.Dir(root)} {
+		if _, err := backupDirectory(root, invalid); err == nil {
+			t.Fatalf("accepted invalid backup directory: %s", invalid)
 		}
 	}
-	links, err := collectLinks(root)
+}
+
+func TestMigrateWaybackWithoutLosingArchiveURLs(t *testing.T) {
+	r, _ := newTestRunner(t)
+	raw := "https://example.com/"
+	archive := "https://web.archive.org/web/20261118000000/https://example.com/"
+	old := fmt.Sprintf(`{"version":1,"retry_at":"2099-01-01T00:00:00Z","entries":{
+		%q:{"status":"archived","archive_url":%q},
+		"https://example.net/":{"status":"blocked","error":"error:blocked","error_msg":"wayback blocked"},
+		"https://example.org/":{"status":"replay_pending","job_id":"old-job","retry_at":"2099-01-01T00:00:00Z","force_rearchive":true}}}`, raw, archive)
+	if err := os.WriteFile(r.ledger.path, []byte(old), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := loadLedger(r.ledger.path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	included, excluded := filterLinks(links)
-	want := []string{
-		"https://en.wikipedia.org/wiki/Example",
-		"https://github.com/nhooyr/nhooyr.github.io",
-		"https://github.com/nhooyr/nhooyr.github.io?tab=readme&x=1",
+	for _, entry := range ledger.data {
+		if entry.Status != "ready" || entry.Error != "" || entry.RetryAt != "" {
+			t.Fatalf("Wayback state leaked into local capture: %+v", entry)
+		}
 	}
-	if !reflect.DeepEqual(included, []string{"https://example.org/article"}) || !reflect.DeepEqual(excluded, want) {
-		t.Fatalf("Incorrect link partition: included=%v, excluded=%v", included, excluded)
+	if ledger.record(raw).ArchiveURL != archive || !ledger.record("https://example.org/").ForceRearchive {
+		t.Fatal("migration lost archive URL or explicit force request")
 	}
-	path := filepath.Join(root, "xoutlinks", "dbx.json")
-	if err := writeJSON(path, excluded); err != nil {
+	r.ledger = ledger
+	if err := r.run(context.Background(), []string{raw, "https://example.net/"}); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+	if ledger.record(raw).ArchiveURL != archive {
+		t.Fatal("local save discarded the old Wayback URL")
 	}
-	var decoded []string
-	if err := json.Unmarshal(before, &decoded); err != nil || !reflect.DeepEqual(decoded, want) {
-		t.Fatalf("Excluded database is not the expected URL array: %s, %v", before, err)
-	}
-	// A deliberately old mtime proves an unchanged inventory is not rewritten.
-	oldTime := time.Unix(1000000000, 0)
-	if err := os.Chtimes(path, oldTime, oldTime); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeJSON(path, excluded); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(path)
-	if err != nil || !info.ModTime().Equal(oldTime) {
-		t.Fatalf("Unchanged inventory was rewritten: %v", err)
-	}
-	if err := os.Remove(filepath.Join(root, "more.html")); err != nil {
-		t.Fatal(err)
-	}
-	links, err = collectLinks(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, excluded = filterLinks(links)
-	if err := writeJSON(path, excluded); err != nil {
-		t.Fatal(err)
-	}
-	after, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(after, &decoded); err != nil || !reflect.DeepEqual(decoded, want[:2]) {
-		t.Fatalf("Inventory did not remove the deleted link: %s, %v", after, err)
+	if !bytes.Contains(readFile(t, ledger.path), []byte(`"version": 2`)) {
+		t.Fatal("database version was not upgraded")
 	}
 }
 
-func TestExcludedLinksDatabaseUsesEmptyArray(t *testing.T) {
-	_, excluded := filterLinks([]string{"https://example.org/article"})
-	path := filepath.Join(t.TempDir(), "dbx.json")
-	if err := writeJSON(path, excluded); err != nil {
-		t.Fatal(err)
-	}
-	content, err := os.ReadFile(path)
-	if err != nil || string(content) != "[]\n" {
-		t.Fatalf("Expected empty JSON array, got %q: %v", content, err)
-	}
-}
-
-func TestExistingSnapshotSkipsSaveAndStatus(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	url := "https://example.com/page"
-	client := &fakeArchiveService{availableFn: func(_ context.Context, url string) (string, error) {
-		return testSnapshot(url), nil
-	}}
-	if err := testRun(t, ledger, client, []string{url}); err != nil {
-		t.Fatal(err)
-	}
-	if got := client.counts(); got != [3]int{1, 0, 0} {
-		t.Fatalf("Existing snapshot caused unnecessary work: %v", got)
-	}
-	if got := testReadEntries(t, path)[url]; got.ArchiveURL != testSnapshot(url) {
-		t.Fatalf("Snapshot was not persisted: %+v", got)
-	}
-}
-
-func TestWaybackLinksAreExcludedWithoutDiscardingArchiveResults(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	original := "https://example.com/page"
-	archived := testSnapshot(original)
-	if err := ledger.put(archived, []string{archived}, Entry{Status: "pending", JobID: "must-not-poll"}); err != nil {
-		t.Fatal(err)
-	}
-	retained := Entry{Status: "archived", ArchiveURL: archived}
-	if err := ledger.put(original, []string{original}, retained); err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeArchiveService{}
-	if err := testRun(t, ledger, client, []string{original, archived, "https://web.archive.org/web/20200101000000/https://other.example/"}); err != nil {
-		t.Fatal(err)
-	}
-	if got := client.counts(); got != [3]int{} {
-		t.Fatalf("Archive URLs caused requests: %v", got)
-	}
-	entries := testReadEntries(t, path)
-	if len(entries) != 1 || entries[original] != retained {
-		t.Fatalf("Excluded archive inputs affected a saved result: %+v", entries)
-	}
-}
-
-func TestRecordPrefersArchivedEntriesAndStripsFragments(t *testing.T) {
-	base := "https://example.com/page"
-	archived := Entry{Status: "archived", ArchiveURL: testSnapshot(base)}
-	fragment := archived
-	fragment.ArchiveURL += "#section"
-	pending := Entry{Status: "pending", JobID: "job"}
-	for _, test := range []struct {
-		name    string
-		entries map[string]Entry
-	}{
-		{"base archived", map[string]Entry{base: archived, base + "#section": pending}},
-		{"base archived with fragment", map[string]Entry{base: fragment}},
-		{"alias archived", map[string]Entry{base: pending, base + "#section": fragment}},
-		{"alias only", map[string]Entry{base + "#section": fragment}},
+func TestInvalidDatabaseDoesNotGetRewritten(t *testing.T) {
+	for _, data := range []string{
+		`{"version":999,"entries":{}}`,
+		`{"version":2,"entries":{"https://example.com":{"status":"saved","file":"../outside.html"}}}`,
+		`{"version":2,"entries":{"https://example.com":{"status":"failed","retry_at":"tomorrow"}}}`,
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			ledger := &Ledger{data: test.entries}
-			if got, found := ledger.record(base); !found || got != archived {
-				t.Fatalf("Expected archived base entry, got %+v, found=%v", got, found)
+		t.Run(data, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "db.json")
+			if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loadLedger(path); err == nil {
+				t.Fatal("invalid database was accepted")
+			}
+			if string(readFile(t, path)) != data {
+				t.Fatal("invalid database was modified")
 			}
 		})
 	}
 }
 
-func TestPendingJobResumesWithoutAnotherPost(t *testing.T) {
-	ledger, _ := newTestLedger(t)
-	url := "https://example.com/page"
-	if err := ledger.put(url, []string{url}, Entry{Status: "pending", JobID: "job:" + url}); err != nil {
+func TestLoadingClearsExpiredRetriesAndKeepsBlockedFailuresPermanent(t *testing.T) {
+	r, _ := newTestRunner(t)
+	raw := "https://example.com/"
+	putEntry(t, r, raw, Entry{Status: "failed", Error: "error:blocked",
+		ErrorMsg: "site blocked access", PendingFile: "backups/pending.html",
+		RetryAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)})
+	putEntry(t, r, raw+"expired", Entry{Status: "failed", Error: "error:capture",
+		RetryAt: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)})
+	ledger, err := loadLedger(r.ledger.path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	client := &fakeArchiveService{}
-	if err := testRun(t, ledger, client, []string{url}); err != nil {
-		t.Fatal(err)
+	blocked := ledger.record(raw)
+	if blocked.Status != "blocked" || blocked.PendingFile != "" || blocked.RetryAt != "" {
+		t.Fatalf("blocked failure remained retryable: %+v", blocked)
 	}
-	if got := client.counts(); got != [3]int{0, 0, 1} {
-		t.Fatalf("Pending capture was submitted again: %v", got)
+	if ledger.record(raw+"expired").RetryAt != "" {
+		t.Fatal("expired retry_at was retained")
 	}
 }
 
-func TestReadyCheckpointSkipsAvailability(t *testing.T) {
-	ledger, _ := newTestLedger(t)
-	url := "https://example.com/page"
-	if err := ledger.put(url, []string{url}, Entry{Status: "ready"}); err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeArchiveService{}
-	if err := testRun(t, ledger, client, []string{url}); err != nil {
-		t.Fatal(err)
-	}
-	if got := client.counts(); got != [3]int{0, 1, 1} {
-		t.Fatalf("Ready capture performed an unnecessary lookup: %v", got)
-	}
-}
-
-func TestCanceledSubmissionReusesAvailableCapture(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	url := "https://example.com/page"
+func TestInterruptedSaveResumesPendingFile(t *testing.T) {
+	r, saver := newTestRunner(t)
+	raw := "https://example.com/"
 	ctx, cancel := context.WithCancel(context.Background())
-	client := &fakeArchiveService{saveFn: func(_ context.Context, _ string) (capture, error) {
-		entry := testReadEntries(t, path)[url]
-		if entry.Status != "submitting" {
-			t.Errorf("Save started before its checkpoint was persisted: %+v", entry)
-		}
+	saver.saveFn = func(context.Context, string, string) error {
 		cancel()
-		return capture{}, context.Canceled
-	}}
-	r := runner{ledger: ledger, client: client, now: fixedTestTime, concurrency: 3}
-	if err := r.run(ctx, []string{url}); err == nil {
-		t.Fatal("Expected canceled submission error")
+		return ctx.Err()
 	}
-	resumed := &fakeArchiveService{availableFn: func(context.Context, string) (string, error) { return testSnapshot(url), nil }}
-	if err := testRun(t, ledger, resumed, []string{url}); err != nil {
-		t.Fatalf("Interrupted submission did not recover its capture: %v", err)
+	if err := r.run(ctx, []string{raw}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation: %v", err)
 	}
-	if got := resumed.counts(); got != [3]int{1, 0, 0} {
-		t.Fatalf("Interrupted capture was resubmitted: %v", got)
+	before := r.ledger.record(raw)
+	if before.Status != "saving" || before.PendingFile == "" || before.Error != "" {
+		t.Fatalf("pending save was not preserved: %+v", before)
 	}
-}
-
-func TestFailedEntriesRetryAutomatically(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	url := "https://example.com/page"
-	if err := ledger.put(url, []string{url}, Entry{Status: "failed", ErrorMsg: "Unavailable"}); err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeArchiveService{}
-	if err := testRun(t, ledger, client, []string{url}); err != nil {
-		t.Fatal(err)
-	}
-	if got := client.counts(); got != [3]int{1, 1, 1} {
-		t.Fatalf("Automatic retry did not run once: %v", got)
-	}
-	if got := testReadEntries(t, path)[url]; got.Status != "archived" || got.ErrorMsg != "" {
-		t.Fatalf("Automatic retry did not clear the failure: %+v", got)
-	}
-	if err := testRun(t, ledger, client, []string{url}); err != nil || client.counts() != [3]int{1, 1, 1} {
-		t.Fatalf("Successful retry was repeated: %v, %v", client.counts(), err)
-	}
-}
-
-func TestFailedCaptureRetriesWithoutDelayingOtherURLs(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	bad, good := "https://example.com/a", "https://example.com/b"
-	message := "The request could not be recorded.\nAdditional diagnostic details."
-	var attempts atomic.Int32
-	var goodFinished atomic.Bool
-	var output strings.Builder
-	client := &fakeArchiveService{statusFn: func(_ context.Context, job string) (capture, error) {
-		raw := strings.TrimPrefix(job, "job:")
-		if raw == bad {
-			switch attempts.Add(1) {
-			case 1:
-				return capture{Status: "error", StatusExt: "error:no-request", Message: message}, nil
-			case 2:
-				return capture{Status: "error", StatusExt: "error:no-request"}, nil
-			}
-		}
-		if raw == good {
-			stored := testReadEntries(t, path)[bad]
-			if stored.Error != "error:no-request" || stored.ErrorMsg != message || stored.RetryAt == "" {
-				t.Errorf("Full error or retry deadline was not saved: %+v", stored)
-			}
-			goodFinished.Store(true)
-		} else if !goodFinished.Load() {
-			t.Error("Retry blocked the other URL")
-		}
-		return capture{Status: "success", Timestamp: testTimestamp, OriginalURL: raw}, nil
-	}}
-	r := runner{ledger: ledger, client: client, concurrency: 1, retryInterval: 40 * time.Millisecond, output: &output}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if err := r.run(ctx, []string{bad, good}); err != nil {
-		t.Fatal(err)
-	}
-	if attempts.Load() != 3 || len(client.saveCalls) != 4 {
-		t.Fatalf("Unexpected retry counts: %d attempts, %v saves", attempts.Load(), client.saveCalls)
-	}
-	if !strings.Contains(output.String(), bad+": failed: error:no-request: "+message) {
-		t.Fatalf("Full error was not printed: %q", output.String())
-	}
-	for raw, entry := range testReadEntries(t, path) {
-		if entry.Status != "archived" || entry.Error != "" || entry.ErrorMsg != "" || entry.RetryAt != "" {
-			t.Errorf("Recovered URL retained failure metadata: %s: %+v", raw, entry)
-		}
-	}
-}
-
-func TestCanceledRetryWaitPersistsAndResumesItsDeadline(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	bad, good := "https://example.com/a", "https://example.com/b"
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	client := &fakeArchiveService{statusFn: func(_ context.Context, job string) (capture, error) {
-		raw := strings.TrimPrefix(job, "job:")
-		if raw == bad {
-			return capture{Status: "error", StatusExt: "error:no-request", Message: "Try later."}, nil
-		}
-		cancel()
-		return capture{Status: "success", Timestamp: testTimestamp, OriginalURL: raw}, nil
-	}}
-	r := runner{ledger: ledger, client: client, concurrency: 1, retryInterval: time.Hour}
-	if err := r.run(ctx, []string{bad, good}); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Retry wait ignored cancellation: %v", err)
-	}
-	saved := testReadEntries(t, path)[bad]
-	if saved.RetryAt == "" || saved.Error != "error:no-request" || saved.ErrorMsg != "Try later." {
-		t.Fatalf("Cancellation lost the retry state: %+v", saved)
-	}
-	loaded, err := loadLedger(path)
+	ledger, err := loadLedger(r.ledger.path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resumed := &fakeArchiveService{}
-	var output strings.Builder
-	r = runner{ledger: loaded, client: resumed, concurrency: 1, retryInterval: time.Millisecond, output: &output}
-	ctx, cancel = context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	if err := r.run(ctx, []string{bad}); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Resumed retry did not honor its saved deadline: %v", err)
-	}
-	if resumed.counts() != [3]int{} || testReadEntries(t, path)[bad] != saved {
-		t.Fatal("Resuming repeated a request before its saved deadline")
-	}
-	until, err := time.Parse(time.RFC3339Nano, saved.RetryAt)
-	if err != nil {
+	r.ledger = ledger
+	saver.saveFn = nil
+	if err := r.run(context.Background(), []string{raw}); err != nil {
 		t.Fatal(err)
 	}
-	want := bad + ": failed: error:no-request: Try later.\n" + bad + ": retry at " + until.Local().Format("2006-01-02 15:04:05 MST") + "\n"
-	if got := output.String(); got != want {
-		t.Fatalf("Saved error did not precede the retry message: %q; want %q", got, want)
+	after := ledger.record(raw)
+	if after.File != before.PendingFile || after.Status != "saved" {
+		t.Fatalf("resume did not use the pending destination: %+v", after)
 	}
 }
 
-type chunkWriter struct{ writes []string }
-
-func (w *chunkWriter) Write(p []byte) (int, error) {
-	w.writes = append(w.writes, string(p))
-	return len(p), nil
+func TestCompletedFileBeforeDBUpdateIsRecovered(t *testing.T) {
+	r, _ := newTestRunner(t)
+	raw := "https://example.com/"
+	if err := os.Mkdir(filepath.Join(r.root, "backups"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	name := "backups/completed.html"
+	if err := os.WriteFile(filepath.Join(r.root, name), []byte("<p>complete</p>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	putEntry(t, r, raw, Entry{Status: "saving", PendingFile: name, ForceRearchive: true})
+	r.saver = nil
+	if err := r.run(context.Background(), []string{raw}); err != nil {
+		t.Fatal(err)
+	}
+	entry := r.ledger.record(raw)
+	if entry.Status != "saved" || entry.File != name || entry.ForceRearchive || entry.PendingFile != "" {
+		t.Fatalf("completed file was not recovered: %+v", entry)
+	}
 }
 
-func TestConcurrentErrorsAndRetriesStayTogether(t *testing.T) {
-	for _, saved := range []bool{false, true} {
-		t.Run(fmt.Sprint(saved), func(t *testing.T) {
-			ledger, _ := newTestLedger(t)
-			var output chunkWriter
-			client := &fakeArchiveService{verifyFn: func(context.Context, string) error { return errReplayNotFound }}
-			r := runner{ledger: ledger, client: client, output: &output, retryInterval: time.Minute, now: fixedTestTime}
-			const count = 16
-			var workers sync.WaitGroup
-			for i := range count {
-				base := fmt.Sprintf("https://example.com/%d", i)
-				entry := Entry{Status: "replay_pending", ArchiveURL: testSnapshot(base)}
-				if saved {
-					entry.ErrorMsg = "verify archive replay " + entry.ArchiveURL + ": " + errReplayNotFound.Error()
-					entry.RetryAt = testNow.Add(time.Hour).Format(time.RFC3339)
+func TestForcedRearchiveKeepsPreviousBackupUntilSuccess(t *testing.T) {
+	r, saver := newTestRunner(t)
+	raw := "https://example.com/"
+	if err := r.run(context.Background(), []string{raw}); err != nil {
+		t.Fatal(err)
+	}
+	old := r.ledger.record(raw)
+	forced := old
+	forced.ForceRearchive = true
+	putEntry(t, r, raw+"#force", forced)
+	saver.saveFn = func(context.Context, string, string) error { return errors.New("temporary network failure") }
+	if err := r.run(context.Background(), []string{raw}); !errors.Is(err, errIncomplete) {
+		t.Fatalf("expected incomplete backup: %v", err)
+	}
+	failed := r.ledger.record(raw)
+	if failed.File != old.File || !failed.ForceRearchive || failed.PendingFile == "" {
+		t.Fatalf("failed replacement lost the old backup or resume state: %+v", failed)
+	}
+	if len(readFile(t, filepath.Join(r.root, old.File))) == 0 {
+		t.Fatal("old backup was damaged")
+	}
+	saver.saveFn = nil
+	if err := r.run(context.Background(), []string{raw}); err != nil {
+		t.Fatal(err)
+	}
+	saved := r.ledger.record(raw)
+	if saved.File != failed.PendingFile || saved.File == old.File || saved.ForceRearchive {
+		t.Fatalf("forced capture did not finish correctly: %+v", saved)
+	}
+	if saver.count() != 3 || saved.Error != "" || saved.ErrorMsg != "" || saved.RetryAt != "" {
+		t.Fatalf("incorrect capture count or stale error: %+v", saved)
+	}
+}
+
+func TestAutomaticRetryDoesNotDelayOtherURLs(t *testing.T) {
+	r, saver := newTestRunner(t)
+	r.concurrency, r.retryInterval = 1, 20*time.Millisecond
+	var calls atomic.Int32
+	otherSaved := make(chan struct{})
+	saver.saveFn = func(ctx context.Context, raw, path string) error {
+		if strings.Contains(raw, "retry") {
+			if calls.Add(1) == 1 {
+				return errors.New("temporary failure")
+			}
+			select {
+			case <-otherSaved:
+			default:
+				return errors.New("retry blocked the other URL")
+			}
+		} else {
+			close(otherSaved)
+		}
+		return os.WriteFile(path, []byte("<p>saved</p>"), 0644)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := r.run(ctx, []string{"https://a.test/retry", "https://b.test/other"}); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 2 || saver.count() != 3 {
+		t.Fatalf("unexpected retries: %v", saver.calls)
+	}
+}
+
+func TestRetryDeadlineSurvivesCancellation(t *testing.T) {
+	r, saver := newTestRunner(t)
+	r.retryInterval = time.Hour
+	raw := "https://example.com/"
+	entry := Entry{Status: "failed", Error: "error:capture", ErrorMsg: "temporary failure",
+		RetryAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano), PendingFile: "backups/pending.html"}
+	putEntry(t, r, raw, entry)
+	before := readFile(t, r.ledger.path)
+	var output bytes.Buffer
+	r.output = &output
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Millisecond)
+	defer cancel()
+	if err := r.run(ctx, []string{raw}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected canceled wait: %v", err)
+	}
+	if saver.count() != 0 || !bytes.Equal(before, readFile(t, r.ledger.path)) {
+		t.Fatal("canceled wait changed progress or submitted a save")
+	}
+	if !strings.Contains(output.String(), raw+": failed: error:capture: temporary failure\n"+raw+": retry at ") {
+		t.Fatalf("saved error was not printed before deadline: %s", output.String())
+	}
+	entry.RetryAt = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	putEntry(t, r, raw, entry)
+	if err := r.run(context.Background(), []string{raw}); err != nil {
+		t.Fatal(err)
+	}
+	if saver.count() != 1 || r.ledger.record(raw).RetryAt != "" {
+		t.Fatal("expired retry deadline did not clear")
+	}
+}
+
+func TestPermanentFailuresAreIgnoredBut404Retries(t *testing.T) {
+	for _, tc := range []struct {
+		url     string
+		status  int
+		blocked bool
+	}{
+		{"https://example.com/403", 403, true},
+		{"https://example.com/999", 999, true},
+		{"https://www.linkedin.com/in/test", 404, true},
+		{"https://example.com/404", 404, false},
+	} {
+		t.Run(tc.url, func(t *testing.T) {
+			r, saver := newTestRunner(t)
+			saver.saveFn = func(context.Context, string, string) error {
+				return &captureError{code: fmt.Sprintf("error:http-%d", tc.status), message: fmt.Sprintf("HTTP status=%d", tc.status)}
+			}
+			err := r.run(context.Background(), []string{tc.url})
+			if tc.blocked {
+				if err != nil || r.ledger.record(tc.url).Status != "blocked" {
+					t.Fatalf("permanent failure was not recorded: %v, %+v", err, r.ledger.record(tc.url))
 				}
-				if err := ledger.put(base, []string{base}, entry); err != nil {
+				r.saver = nil
+				if err := r.run(context.Background(), []string{tc.url}); err != nil {
 					t.Fatal(err)
 				}
-				workers.Add(1)
-				go func() {
-					defer workers.Done()
-					var retry *retryLater
-					if err := r.attempt(context.Background(), work{base, []string{base}, entry}); !errors.As(err, &retry) {
-						t.Errorf("Expected a scheduled retry: %v", err)
-					}
-				}()
-			}
-			workers.Wait()
-			pairs := make(map[string]bool)
-			for _, chunk := range output.writes {
-				base, _, found := strings.Cut(chunk, ": replay unavailable: ")
-				if !found {
-					continue
+			} else {
+				if !errors.Is(err, errIncomplete) {
+					t.Fatalf("nonpermanent failure did not produce nonzero result: %v", err)
 				}
-				lines := strings.Split(strings.TrimSuffix(chunk, "\n"), "\n")
-				if len(lines) != 2 || !strings.HasPrefix(lines[1], base+": waiting for replay; retry at ") {
-					t.Fatalf("Error and retry were not emitted together: %q", chunk)
-				}
-				if pairs[base] {
-					t.Fatalf("Error was printed more than once: %s", base)
-				}
-				pairs[base] = true
-			}
-			if len(pairs) != count {
-				t.Fatalf("Expected %d error/retry pairs, got %d", count, len(pairs))
-			}
-		})
-	}
-}
-
-func TestCancellationReportsEachURLOnce(t *testing.T) {
-	for _, mode := range []string{"before start", "active and queued", "retry waits"} {
-		t.Run(mode, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			items := []work{{base: "https://example.com/a"}, {base: "https://example.com/b"}, {base: "https://example.com/c"}}
-			started := make(chan struct{}, len(items))
-			if mode == "before start" {
-				cancel()
-			}
-			done := make(chan error, 1)
-			go func() {
-				done <- parallel(ctx, items, 1, func(ctx context.Context, _ work) error {
-					started <- struct{}{}
-					if mode == "retry waits" {
-						return &retryLater{delay: time.Hour}
-					}
-					<-ctx.Done()
-					return ctx.Err()
-				})
-			}()
-			count := 1
-			if mode == "retry waits" {
-				count = len(items)
-			} else if mode == "before start" {
-				count = 0
-			}
-			for range count {
-				select {
-				case <-started:
-				case <-time.After(3 * time.Second):
-					t.Fatal("Workers did not reach the cancellation point")
-				}
-			}
-			cancel()
-			var err error
-			select {
-			case err = <-done:
-			case <-time.After(3 * time.Second):
-				t.Fatal("Cancellation did not stop the workers")
-			}
-			if !errors.Is(err, context.Canceled) {
-				t.Fatalf("Cancellation was not preserved: %v", err)
-			}
-			lines := strings.Split(err.Error(), "\n")
-			if len(lines) != len(items) {
-				t.Fatalf("Expected one cancellation per URL: %q", lines)
-			}
-			for _, item := range items {
-				want := item.base + ": " + context.Canceled.Error()
-				if count := strings.Count("\n"+err.Error()+"\n", "\n"+want+"\n"); count != 1 {
-					t.Errorf("Expected one %q, got %d: %v", want, count, err)
+				saver.saveFn = nil
+				if err := r.run(context.Background(), []string{tc.url}); err != nil {
+					t.Fatal(err)
 				}
 			}
 		})
 	}
 }
 
-func TestRetryingStatusFailureKeepsTheExistingJob(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	raw := "https://example.com/pending"
-	if err := ledger.put(raw, []string{raw}, Entry{Status: "pending", JobID: "existing-job"}); err != nil {
-		t.Fatal(err)
+func TestPinterestTimeoutRule(t *testing.T) {
+	for _, tc := range []struct {
+		url     string
+		message string
+		blocked bool
+	}{
+		{"https://www.pinterest.com/aqsnow", "Load timeout", true},
+		{"https://pinterest.com/aqsnow", "Capture timeout", true},
+		{"https://WWW.PINTEREST.COM/aqsnow", "Setup TIMEOUT", true},
+		{"https://uk.pinterest.com/aqsnow", "connection timed out", true},
+		{"https://pinterest.com/aqsnow", "context deadline exceeded", true},
+		{"https://pinterest.com/aqsnow", "net::ERR_TIMED_OUT", true},
+		{"https://pinterest.com/aqsnow", "HTTP status=404", false},
+		{"https://pinterest.com/aqsnow", "HTTP status=429", false},
+		{"https://pinterest.com/aqsnow", "browser exited unexpectedly", false},
+		{"https://pinterest.com.example.com/aqsnow", "Load timeout", false},
+		{"https://notpinterest.com/aqsnow", "Load timeout", false},
+		{"https://example.com/", "Load timeout", false},
+	} {
+		t.Run(tc.url+"/"+tc.message, func(t *testing.T) {
+			entry := normalizeFailure(tc.url, Entry{Status: "failed", Error: "error:capture", ErrorMsg: tc.message})
+			if entry.permanentFailure() != tc.blocked {
+				t.Fatalf("wrong timeout classification: %+v", entry)
+			}
+			if entry.ErrorMsg != tc.message {
+				t.Fatalf("original error message was changed: %+v", entry)
+			}
+			if excludedLink(tc.url) {
+				t.Fatal("timeout rule excluded the URL before capture")
+			}
+		})
 	}
-	var polls atomic.Int32
-	client := &fakeArchiveService{statusFn: func(_ context.Context, job string) (capture, error) {
-		if job != "existing-job" {
-			t.Errorf("Retried a different job: %s", job)
-		}
-		if polls.Add(1) == 1 {
-			return capture{}, &serviceUnavailable{message: "temporary status failure"}
-		}
-		return capture{Status: "success", Timestamp: testTimestamp, OriginalURL: raw}, nil
-	}}
-	r := runner{ledger: ledger, client: client, concurrency: 1, retryInterval: time.Millisecond}
+	saved := Entry{Status: "saved", ErrorMsg: "Load timeout"}
+	if got := normalizeFailure("https://www.pinterest.com/aqsnow", saved); got != saved {
+		t.Fatal("timeout rule changed a saved entry")
+	}
+}
+
+func TestPinterestTimeoutIsSavedAndSkipped(t *testing.T) {
+	r, saver := newTestRunner(t)
+	r.retryInterval = time.Hour
+	raw := "https://www.pinterest.com/aqsnow"
+	message := "Load timeout [2026-11-19T11:55:42.505Z] URL: " + raw + " Error: Load timeout"
+	saver.saveFn = func(context.Context, string, string) error {
+		return &captureError{code: "error:capture", message: message}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := r.run(ctx, []string{raw}); err != nil {
 		t.Fatal(err)
 	}
-	if client.counts() != [3]int{0, 0, 2} || testReadEntries(t, path)[raw].Status != "archived" {
-		t.Fatalf("Status retry resubmitted the capture: %v", client.counts())
+	entry := r.ledger.record(raw)
+	if entry.Status != "blocked" || entry.Error != "error:blocked" || entry.ErrorMsg != message ||
+		entry.RetryAt != "" || entry.PendingFile != "" {
+		t.Fatalf("Pinterest timeout was not permanently blocked: %+v", entry)
 	}
-}
-
-func TestPermanentCaptureFailuresAreSavedAndIgnoredOnLaterRuns(t *testing.T) {
-	for _, failure := range []struct{ name, raw, code, message, wantCode, wantMessage string }{
-		{name: "blocked URL", code: blockedURLError, message: "This URL is on the capture block list."},
-		{name: "blocked code", code: "error:blocked", message: "The target site is blocking us."},
-		{name: "HTTP 999", code: "error:unknown", message: "The target site is blocking us. (HTTP status=999)."},
-		{name: "403 message", code: "error:no-request", message: "The target server blocks access. (HTTP status=403)"},
-		{name: "403 code", code: "error:no-access"},
-		{
-			name: "LinkedIn 404", raw: "https://www.linkedin.com/in/example/",
-			code: "error:not-found", message: "The target server cannot find this page. (HTTP status=404)",
-			wantCode: "error:no-request", wantMessage: "The target server cannot find this page. (HTTP status=403)",
-		},
-	} {
-		for _, stage := range []string{"save", "status"} {
-			t.Run(failure.name+"/"+stage, func(t *testing.T) {
-				ledger, path := newTestLedger(t)
-				blocked, good := "https://example.com/blocked", "https://example.com/good"
-				if failure.raw != "" {
-					blocked = failure.raw
-				}
-				message := failure.message
-				client := &fakeArchiveService{
-					saveFn: func(_ context.Context, raw string) (capture, error) {
-						if stage == "save" && raw == blocked {
-							return capture{Status: "error", StatusExt: failure.code, Message: message}, nil
-						}
-						return capture{JobID: "job:" + raw}, nil
-					},
-					statusFn: func(_ context.Context, job string) (capture, error) {
-						raw := strings.TrimPrefix(job, "job:")
-						if raw == blocked {
-							return capture{Status: "error", StatusExt: failure.code, Message: message}, nil
-						}
-						return capture{Status: "success", Timestamp: testTimestamp, OriginalURL: raw}, nil
-					},
-				}
-				r := runner{ledger: ledger, client: client, now: fixedTestTime, concurrency: 1, retryInterval: time.Millisecond}
-				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				defer cancel()
-				if err := r.run(ctx, []string{blocked, good}); !errors.Is(err, errIncomplete) {
-					t.Fatalf("First blocked result should be reported after the batch: %v", err)
-				}
-				entries := testReadEntries(t, path)
-				wantCode, wantMessage := failure.code, message
-				if failure.wantCode != "" {
-					wantCode, wantMessage = failure.wantCode, failure.wantMessage
-				}
-				if got := entries[blocked]; got.Status != "blocked" || got.Error != wantCode || got.ErrorMsg != wantMessage || got.JobID != "" || got.RetryAt != "" {
-					t.Fatalf("Blocked result was not saved permanently: %+v", got)
-				}
-				if entries[good].Status != "archived" || len(client.availableCalls) != 2 {
-					t.Fatal("Blocked result prevented other work or caused an extra lookup")
-				}
-				before, err := os.ReadFile(path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				resumed := &fakeArchiveService{}
-				r.client = resumed
-				if err := r.run(ctx, []string{blocked, good}); err != nil {
-					t.Fatalf("Cached blocked URL was not ignored: %v", err)
-				}
-				after, err := os.ReadFile(path)
-				if err != nil || resumed.counts() != [3]int{} || string(before) != string(after) {
-					t.Fatalf("Blocked URL caused repeat work: %v, %v", resumed.counts(), err)
-				}
-			})
-		}
-	}
-}
-
-func TestLoadingDisablesRetriesForPast403Failures(t *testing.T) {
-	for _, status := range []string{"failed", "blocked", "pending"} {
-		t.Run(status, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "db.json")
-			raw := "https://example.com/page"
-			entry := Entry{Status: status, JobID: "stale-job", Error: "error:no-request", ErrorMsg: "Target could not be captured. (HTTP status=403)", RetryAt: testNow.Add(time.Hour).Format(time.RFC3339)}
-			if err := writeJSON(path, database{Version: databaseVersion, Entries: map[string]Entry{raw: entry}}); err != nil {
-				t.Fatal(err)
-			}
-			ledger, err := loadLedgerAt(path, testNow)
-			if err != nil {
-				t.Fatal(err)
-			}
-			client := &fakeArchiveService{}
-			r := runner{ledger: ledger, client: client, retryInterval: time.Millisecond, now: fixedTestTime}
-			if err := r.run(context.Background(), []string{raw}); err != nil || client.counts() != [3]int{} {
-				t.Fatalf("Permanent failure was retried: %v, %v", err, client.counts())
-			}
-			entry.Status, entry.JobID, entry.RetryAt = "blocked", "", ""
-			if got := testReadEntries(t, path)[raw]; got != entry {
-				t.Fatalf("Failure details were changed or retry retained: %+v", got)
-			}
-		})
-	}
-}
-
-func TestLoadingNormalizesBlocked404Failures(t *testing.T) {
-	for _, domain := range []string{"linkedin.com"} {
-		for _, status := range []string{"failed", "replay_pending"} {
-			t.Run(domain+"/"+status, func(t *testing.T) {
-				path := filepath.Join(t.TempDir(), "db.json")
-				raw := "https://www." + domain + "/example"
-				entry := Entry{Status: status, Error: "error:not-found", ErrorMsg: "Page not found. (HTTP status=404)", RetryAt: testNow.Add(time.Hour).Format(time.RFC3339)}
-				wantMessage := "Page not found. (HTTP status=403)"
-				if status == "replay_pending" {
-					entry.ArchiveURL = testSnapshot(raw)
-					entry.Error = ""
-					entry.ErrorMsg = "verify archive replay " + entry.ArchiveURL + ": wayback replay returned HTTP 404"
-					wantMessage = "verify archive replay " + entry.ArchiveURL + ": wayback replay returned HTTP 403"
-				}
-				if err := writeJSON(path, database{Version: databaseVersion, Entries: map[string]Entry{raw: entry}}); err != nil {
-					t.Fatal(err)
-				}
-				ledger, err := loadLedgerAt(path, testNow)
-				if err != nil {
-					t.Fatal(err)
-				}
-				entry.Status, entry.Error, entry.ErrorMsg, entry.RetryAt = "blocked", "error:no-request", wantMessage, ""
-				if got := testReadEntries(t, path)[raw]; got != entry {
-					t.Fatalf("404 was not normalized and blocked: %+v", got)
-				}
-				client := &fakeArchiveService{verifyFn: func(context.Context, string) error {
-					t.Error("Blocked replay was retried")
-					return nil
-				}}
-				if err := testRun(t, ledger, client, []string{raw}); err != nil || client.counts() != [3]int{} {
-					t.Fatalf("Blocked failure was retried: %v, %v", err, client.counts())
-				}
-			})
-		}
-	}
-}
-
-func TestBlocked404RuleScope(t *testing.T) {
-	original := Entry{Status: "failed", Error: "error:not-found", ErrorMsg: "Page not found. (HTTP status=404)"}
-	for _, test := range []struct {
-		raw     string
-		matches bool
-	}{
-		{"https://linkedin.com/in/example", true},
-		{"https://www.linkedin.com/in/example", true},
-		{"https://ca.linkedin.com/in/example", true},
-		{"https://WWW.LinkedIn.COM./in/example", true},
-		{"https://threads.com/@example", false},
-		{"https://www.threads.com/@example", false},
-		{"https://sub.threads.com/@example", false},
-		{"https://notlinkedin.com/in/example", false},
-		{"https://linkedin.com.example.com/in/example", false},
-		{"https://example.com/linkedin.com", false},
-		{"https://notthreads.com/@example", false},
-		{"https://threads.com.example.com/@example", false},
-	} {
-		t.Run(test.raw, func(t *testing.T) {
-			want := original
-			if test.matches {
-				want.Error, want.ErrorMsg = "error:no-request", "Page not found. (HTTP status=403)"
-			}
-			if got := normalizeFailure(test.raw, original); got != want {
-				t.Fatalf("Unexpected normalization: %+v; want %+v", got, want)
-			}
-			if got := normalizeFailure(test.raw, want); got != want {
-				t.Fatalf("Repeated normalization changed the failure: %+v", got)
-			}
-		})
-	}
-	for _, entry := range []Entry{
-		{Status: "needs_auth", Error: "error:not-found", ErrorMsg: "HTTP status=404"},
-		{Status: "archived", Error: "error:not-found", ErrorMsg: "HTTP status=404"},
-		{Status: "failed", Error: "error:no-request", ErrorMsg: "HTTP status=500"},
-	} {
-		if got := normalizeFailure("https://www.linkedin.com/in/example", entry); got != entry {
-			t.Errorf("Unrelated result was normalized: %+v", got)
-		}
-	}
-}
-
-func TestBlocked404ReplayStopsPolling(t *testing.T) {
-	for _, domain := range []string{"linkedin.com"} {
-		t.Run(domain, func(t *testing.T) {
-			ledger, path := newTestLedger(t)
-			raw := "https://www." + domain + "/example"
-			if err := ledger.put(raw, []string{raw}, Entry{Status: "replay_pending", ArchiveURL: testSnapshot(raw)}); err != nil {
-				t.Fatal(err)
-			}
-			var checks atomic.Int32
-			client := &fakeArchiveService{verifyFn: func(_ context.Context, archive string) error {
-				checks.Add(1)
-				return fmt.Errorf("verify archive replay %s: %w", archive, errReplayNotFound)
-			}}
-			r := runner{ledger: ledger, client: client, retryInterval: time.Millisecond}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			if err := r.run(ctx, []string{raw}); !errors.Is(err, errIncomplete) {
-				t.Fatalf("New blocked failure was not reported: %v", err)
-			}
-			entry := testReadEntries(t, path)[raw]
-			if entry.Status != "blocked" || entry.Error != "error:no-request" || !strings.HasSuffix(entry.ErrorMsg, "HTTP 403") || entry.RetryAt != "" {
-				t.Fatalf("Replay 404 was not saved as a permanent failure: %+v", entry)
-			}
-			if err := r.run(ctx, []string{raw}); err != nil || checks.Load() != 1 || client.counts() != [3]int{} {
-				t.Fatalf("Blocked replay was retried: %v, %d checks, %v", err, checks.Load(), client.counts())
-			}
-		})
-	}
-}
-
-func TestOrdinary404FailuresRetry(t *testing.T) {
-	for _, failure := range []struct{ code, message string }{
-		{"error:no-request", "Page not found. (HTTP status=404)"},
-		{"error:not-found", "Page not found."},
-		{"error:target-not-found", ""},
-	} {
-		t.Run(failure.code, func(t *testing.T) {
-			ledger, path := newTestLedger(t)
-			raw := "https://example.com/page"
-			var attempts atomic.Int32
-			client := &fakeArchiveService{statusFn: func(context.Context, string) (capture, error) {
-				if attempts.Add(1) == 1 {
-					return capture{Status: "error", StatusExt: failure.code, Message: failure.message}, nil
-				}
-				return capture{Status: "success", Timestamp: testTimestamp, OriginalURL: raw}, nil
-			}}
-			r := runner{ledger: ledger, client: client, concurrency: 1, retryInterval: time.Millisecond}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			if err := r.run(ctx, []string{raw}); err != nil {
-				t.Fatal(err)
-			}
-			if client.counts() != [3]int{3, 2, 2} || testReadEntries(t, path)[raw].Status != "archived" {
-				t.Fatalf("404 failure was not retried: %v", client.counts())
-			}
-		})
-	}
-}
-
-func TestGlobalAndURLRetryDeadlinesAreBothRespected(t *testing.T) {
-	for _, globalLater := range []bool{false, true} {
-		t.Run(fmt.Sprint(globalLater), func(t *testing.T) {
-			ledger, _ := newTestLedger(t)
-			raw := "https://example.com/retry"
-			now := time.Now()
-			global, local := now.Add(20*time.Millisecond), now.Add(50*time.Millisecond)
-			if globalLater {
-				global, local = local, global
-			}
-			if err := ledger.put(raw, []string{raw}, Entry{Status: "failed", ErrorMsg: "temporary failure", RetryAt: local.Format(time.RFC3339Nano)}); err != nil {
-				t.Fatal(err)
-			}
-			if err := ledger.setCooldown(global); err != nil {
-				t.Fatal(err)
-			}
-			client := &fakeArchiveService{availableFn: func(context.Context, string) (string, error) {
-				if time.Now().Before(global) || time.Now().Before(local) {
-					t.Error("Request started before both retry deadlines had passed")
-				}
-				return testSnapshot(raw), nil
-			}}
-			r := runner{ledger: ledger, client: client, retryInterval: time.Millisecond, concurrency: 1}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			if err := r.run(ctx, []string{raw}); err != nil || client.counts() != [3]int{1, 0, 0} {
-				t.Fatalf("Retry did not run once after both deadlines: %v, %v", client.counts(), err)
-			}
-		})
-	}
-}
-
-func TestTargetStatusClassificationKeepsAuthenticationRetryable(t *testing.T) {
-	for _, entry := range []Entry{
-		{Status: "needs_auth", Error: "error:no-access", ErrorMsg: "HTTP status=403"},
-		{Status: "failed", Error: "error:no-request", ErrorMsg: "HTTP status=429"},
-		{Status: "failed", Error: "error:no-request", ErrorMsg: "HTTP status=500"},
-		{Status: "failed", Error: "error:no-request", ErrorMsg: "HTTP status=4030"},
-		{Status: "failed", Error: "error:no-request", ErrorMsg: "HTTP status=9990"},
-		{Status: "failed", Error: "error:no-request", ErrorMsg: "HTTP status=1999"},
-		{Status: "failed", Error: "error:no-request", ErrorMsg: "HTTP status=404"},
-		{Status: "failed", Error: "error:not-found"},
-		{Status: "failed", Error: "error:target-not-found"},
-	} {
-		if entry.permanentFailure() {
-			t.Errorf("Nonpermanent error was treated as blocked: %+v", entry)
-		}
-	}
-}
-
-func TestLoadingBlocksExplicitBlockErrorsAndHTTP999(t *testing.T) {
-	for _, failure := range []Entry{
-		{Error: "error:blocked", ErrorMsg: "The target site is blocking us."},
-		{ErrorMsg: "The target site is blocking us. (HTTP status=999)."},
-		{ErrorMsg: "wayback returned HTTP 999"},
-	} {
-		for _, status := range []string{"failed", "pending", "replay_pending"} {
-			t.Run(status+"/"+failure.errorText(), func(t *testing.T) {
-				path := filepath.Join(t.TempDir(), "db.json")
-				raw := "https://example.com/blocked"
-				entry := failure
-				entry.Status, entry.JobID = status, "old-job"
-				entry.ArchiveURL = testSnapshot(raw)
-				entry.RetryAt = testNow.Add(time.Hour).Format(time.RFC3339)
-				if err := writeJSON(path, database{Version: databaseVersion, Entries: map[string]Entry{raw: entry}}); err != nil {
-					t.Fatal(err)
-				}
-				ledger, err := loadLedgerAt(path, testNow)
-				if err != nil {
-					t.Fatal(err)
-				}
-				entry.Status, entry.JobID, entry.RetryAt = "blocked", "", ""
-				if got := testReadEntries(t, path)[raw]; got != entry {
-					t.Fatalf("Blocked failure retained retries or lost its error: %+v", got)
-				}
-				client := &fakeArchiveService{verifyFn: func(context.Context, string) error {
-					t.Error("Blocked replay was retried")
-					return nil
-				}}
-				if err := testRun(t, ledger, client, []string{raw}); err != nil || client.counts() != [3]int{} {
-					t.Fatalf("Blocked URL caused further work: %v, %v", err, client.counts())
-				}
-			})
-		}
-	}
-}
-
-func TestLoadingPreservesBlockedRecords(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "db.json")
-	raw := "https://example.com/blocked"
-	if err := writeJSON(path, database{Version: databaseVersion, Entries: map[string]Entry{raw: {Status: "blocked", Error: blockedURLError}}}); err != nil {
-		t.Fatal(err)
-	}
-	ledger, err := loadLedgerAt(path, testNow)
+	ledger, err := loadLedger(r.ledger.path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := &fakeArchiveService{}
-	r := runner{ledger: ledger, client: client, now: fixedTestTime}
-	if err := r.run(context.Background(), []string{raw}); err != nil || client.counts() != [3]int{} {
-		t.Fatalf("Previously blocked URL was retried: %v, %v", client.counts(), err)
+	r.ledger, r.saver = ledger, nil
+	if err := r.run(context.Background(), []string{raw}); err != nil {
+		t.Fatal(err)
 	}
-	if got := testReadEntries(t, path)[raw]; got.Status != "blocked" || got.Error != blockedURLError || got.ErrorMsg != "" {
-		t.Fatalf("Blocked failure was not preserved: %+v", got)
+	if saver.count() != 1 {
+		t.Fatal("blocked Pinterest capture was retried")
 	}
 }
 
-func TestCaptureConcurrencyIsBounded(t *testing.T) {
-	ledger, _ := newTestLedger(t)
-	urls := []string{"https://example.com/1", "https://example.com/2", "https://example.com/3", "https://example.com/4", "https://example.com/5"}
-	started := make(chan string, len(urls))
+func TestLoadingBlocksPendingPinterestTimeout(t *testing.T) {
+	r, _ := newTestRunner(t)
+	raw := "https://www.pinterest.com/aqsnow"
+	putEntry(t, r, raw, Entry{Status: "failed", Error: "error:capture", ErrorMsg: "Load timeout",
+		PendingFile: "backups/pending.html", RetryAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)})
+	ledger, err := loadLedger(r.ledger.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := ledger.record(raw)
+	if entry.Status != "blocked" || entry.Error != "error:blocked" || entry.RetryAt != "" || entry.PendingFile != "" {
+		t.Fatalf("stored Pinterest timeout stayed retryable: %+v", entry)
+	}
+}
+
+func TestFailureDoesNotStopRemainingURLs(t *testing.T) {
+	r, saver := newTestRunner(t)
+	r.concurrency = 1
+	saver.saveFn = func(_ context.Context, raw, path string) error {
+		if strings.Contains(raw, "fail") {
+			return errors.New("failure")
+		}
+		return os.WriteFile(path, []byte("saved"), 0644)
+	}
+	if err := r.run(context.Background(), []string{"https://a.test/fail", "https://b.test/ok", "https://c.test/ok"}); !errors.Is(err, errIncomplete) {
+		t.Fatalf("expected nonzero result after processing all URLs: %v", err)
+	}
+	if saver.count() != 3 || r.ledger.record("https://c.test/ok").Status != "saved" {
+		t.Fatal("failure stopped later URLs")
+	}
+}
+
+func TestExcludedDatabaseIncludesBlockedLinks(t *testing.T) {
+	r, _ := newTestRunner(t)
+	linkedin := "https://www.linkedin.com/in/aqsnow/"
+	pinterest := "https://www.pinterest.com/aqsnow"
+	for _, raw := range []string{linkedin, pinterest} {
+		putEntry(t, r, raw, Entry{Status: "blocked", Error: "error:blocked"})
+	}
+	putEntry(t, r, "https://example.com/saved", Entry{Status: "saved"})
+	explicit := []string{"https://excluded.example/", linkedin, "https://excluded.example/"}
+	if err := r.ledger.setExcluded(explicit); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(filepath.Dir(r.ledger.path), "dbx.json")
+	var got []string
+	if err := json.Unmarshal(readFile(t, path), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"https://excluded.example/", linkedin, pinterest}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("wrong excluded links: %v", got)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ledger.setExcluded(explicit); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !before.ModTime().Equal(after.ModTime()) {
+		t.Fatal("unchanged excluded links were rewritten")
+	}
+}
+
+func TestExcludedDatabaseTracksBlockingAndSuccessfulRetry(t *testing.T) {
+	r, saver := newTestRunner(t)
+	if err := r.ledger.setExcluded(nil); err != nil {
+		t.Fatal(err)
+	}
+	raw := "https://www.pinterest.com/aqsnow"
+	saver.saveFn = func(context.Context, string, string) error {
+		return &captureError{code: "error:capture", message: "Load timeout"}
+	}
+	if err := r.run(context.Background(), []string{raw}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(filepath.Dir(r.ledger.path), "dbx.json")
+	var got []string
+	if err := json.Unmarshal(readFile(t, path), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []string{raw}) {
+		t.Fatalf("newly blocked URL missing: %v", got)
+	}
+	entry := r.ledger.record(raw)
+	entry.ForceRearchive = true
+	putEntry(t, r, raw, entry)
+	saver.saveFn = nil
+	if err := r.run(context.Background(), []string{raw}); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(readFile(t, path)); got != "[]\n" {
+		t.Fatalf("successful retry remains in excluded links: %s", got)
+	}
+}
+
+func TestExcludedDatabaseRecoversAfterWriteFailure(t *testing.T) {
+	r, _ := newTestRunner(t)
+	if err := r.ledger.setExcluded(nil); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(filepath.Dir(r.ledger.path), "dbx.json")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0755); err != nil {
+		t.Fatal(err)
+	}
+	raw := "https://www.pinterest.com/aqsnow"
+	entry := Entry{Status: "blocked", Error: "error:blocked"}
+	if err := r.ledger.put(raw, []string{raw}, entry); err == nil {
+		t.Fatal("expected excluded-index write failure")
+	}
+	if r.ledger.record(raw).Status != "blocked" {
+		t.Fatal("secondary write failure lost the primary record")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ledger.put(raw, []string{raw}, entry); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	if err := json.Unmarshal(readFile(t, path), &got); err != nil || !reflect.DeepEqual(got, []string{raw}) {
+		t.Fatalf("excluded index was not repaired: %v, %v", got, err)
+	}
+}
+
+func TestConcurrentCapturesAndAtomicWrites(t *testing.T) {
+	r, saver := newTestRunner(t)
+	var active, peak atomic.Int32
+	arrived := make(chan struct{}, 20)
 	release := make(chan struct{})
-	var once sync.Once
-	defer once.Do(func() { close(release) })
-	var active, maximum atomic.Int32
-	client := &fakeArchiveService{saveFn: func(ctx context.Context, url string) (capture, error) {
+	go func() {
+		for range 3 {
+			<-arrived
+		}
+		close(release)
+	}()
+	saver.saveFn = func(ctx context.Context, _ string, path string) error {
 		n := active.Add(1)
 		defer active.Add(-1)
-		for previous := maximum.Load(); n > previous; previous = maximum.Load() {
-			if maximum.CompareAndSwap(previous, n) {
+		for old := peak.Load(); n > old; old = peak.Load() {
+			if peak.CompareAndSwap(old, n) {
 				break
 			}
 		}
-		started <- url
+		arrived <- struct{}{}
 		select {
 		case <-release:
-			return capture{JobID: "job:" + url}, nil
 		case <-ctx.Done():
-			return capture{}, ctx.Err()
+			return ctx.Err()
 		}
-	}}
-	r := runner{ledger: ledger, client: client, now: fixedTestTime, concurrency: 3}
+		return os.WriteFile(path, []byte("saved"), 0644)
+	}
+	var urls []string
+	for i := range 20 {
+		urls = append(urls, fmt.Sprintf("https://example.com/%d", i))
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- r.run(ctx, urls) }()
-	for range 3 {
-		select {
-		case <-started:
-		case <-ctx.Done():
-			t.Fatal("Saves did not run concurrently")
-		}
-	}
-	select {
-	case <-started:
-		t.Fatal("More saves started than the configured concurrency")
-	case <-time.After(20 * time.Millisecond):
-	}
-	once.Do(func() { close(release) })
-	if err := <-done; err != nil {
+	if err := r.run(ctx, urls); err != nil {
 		t.Fatal(err)
 	}
-	if got := maximum.Load(); got != 3 {
-		t.Fatalf("Expected three simultaneous saves; got %d", got)
+	if peak.Load() < 2 || peak.Load() > 3 {
+		t.Fatalf("unexpected capture concurrency: %d", peak.Load())
+	}
+	reloaded, err := loadLedger(r.ledger.path)
+	if err != nil || len(reloaded.data) != len(urls) {
+		t.Fatalf("concurrent writes lost results: %v", err)
 	}
 }
 
-func TestLookupServiceFailureDoesNotCancelQueuedWork(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	urls := []string{"https://example.com/1", "https://example.com/2", "https://example.com/3", "https://example.com/4", "https://example.com/5", "https://example.com/6"}
-	client := &fakeArchiveService{availableFn: func(_ context.Context, url string) (string, error) {
-		if url == urls[0] {
-			return "", &serviceUnavailable{message: "service unavailable"}
+func TestErrorsAndRetryMessagesStayTogether(t *testing.T) {
+	r, _ := newTestRunner(t)
+	var output bytes.Buffer
+	r.output = &output
+	var group sync.WaitGroup
+	for i := range 20 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			r.printRetry(fmt.Sprintf("https://example.com/%d", i),
+				Entry{Status: "failed", ErrorMsg: "error"}, time.Now())
+		}()
+	}
+	group.Wait()
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 40 {
+		t.Fatalf("unexpected output: %s", output.String())
+	}
+	for i := 0; i < len(lines); i += 2 {
+		url := strings.SplitN(lines[i], ": failed:", 2)[0]
+		if !strings.HasPrefix(lines[i+1], url+": retry at ") {
+			t.Fatalf("interleaved messages: %q / %q", lines[i], lines[i+1])
 		}
-		return testSnapshot(url), nil
-	}}
-	r := runner{ledger: ledger, client: client, now: fixedTestTime, concurrency: 3}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	}
+}
+
+func TestMultilineErrorPrefixesEveryLine(t *testing.T) {
+	line := errorLine("https://example.com/", Entry{Status: "failed", Error: "error:capture", ErrorMsg: "first line\nsecond line"})
+	if line != "https://example.com/: failed: error:capture: first line\nhttps://example.com/: failed: second line\n" {
+		t.Fatalf("unprefixed error line: %q", line)
+	}
+}
+
+func TestCancellationErrorsHaveURLPrefixes(t *testing.T) {
+	r, saver := newTestRunner(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	saver.saveFn = func(ctx context.Context, _ string, _ string) error {
+		cancel()
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	urls := []string{"https://a.test/", "https://b.test/", "https://c.test/", "https://d.test/"}
 	err := r.run(ctx, urls)
-	var unavailable *serviceUnavailable
-	if !errors.As(err, &unavailable) {
-		t.Fatalf("Expected service failure: %v", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation: %v", err)
 	}
-	if got := client.counts(); got != [3]int{len(urls), 0, 0} {
-		t.Fatalf("Service failure prevented remaining lookups: %v", got)
-	}
-	entries := testReadEntries(t, path)
-	if entries[urls[0]].Status != "failed" || entries[urls[0]].ErrorMsg == "" {
-		t.Fatalf("Service failure was not saved: %+v", entries[urls[0]])
-	}
-	for _, raw := range urls[1:] {
-		if entries[raw].Status != "archived" {
-			t.Errorf("Remaining URL was not processed: %s", raw)
+	for _, raw := range urls {
+		if strings.Count(err.Error(), raw+": context canceled") != 1 {
+			t.Fatalf("missing or duplicate URL cancellation: %v", err)
 		}
 	}
 }
 
-func TestSimultaneousRunLockIsRejected(t *testing.T) {
+func TestLockRejectsSimultaneousWriters(t *testing.T) {
 	root := t.TempDir()
 	unlock, err := lockRepo(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	held := true
-	defer func() {
-		if held {
-			unlock()
-		}
-	}()
-	if secondUnlock, err := lockRepo(root); err == nil {
-		secondUnlock()
-		t.Fatal("Second simultaneous run acquired the repository lock")
+	if second, err := lockRepo(root); err == nil {
+		second()
+		t.Fatal("concurrent writer was allowed")
 	}
 	unlock()
-	held = false
-	unlockedAgain, err := lockRepo(root)
+	again, err := lockRepo(root)
 	if err != nil {
-		t.Fatalf("Lock was not released: %v", err)
+		t.Fatal(err)
 	}
-	unlockedAgain()
+	again()
 }
 
-func TestFailedAtomicWriteRetainsLedgerState(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	old, newURL := "https://example.com/old", "https://example.com/new"
-	if err := ledger.put(old, []string{old}, Entry{Status: "archived", ArchiveURL: testSnapshot(old)}); err != nil {
-		t.Fatal(err)
+func TestFailedDBWriteDoesNotChangeInMemoryState(t *testing.T) {
+	r, _ := newTestRunner(t)
+	r.ledger.path = t.TempDir() // A directory cannot be replaced with a file.
+	if err := r.ledger.put("https://example.com", []string{"https://example.com"}, Entry{Status: "saved"}); err == nil {
+		t.Fatal("expected write failure")
 	}
-	before, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Force the final rename to fail after the replacement JSON has been written.
-	blocked := filepath.Join(filepath.Dir(path), "cannot-replace-directory")
-	if err := os.Mkdir(blocked, 0700); err != nil {
-		t.Fatal(err)
-	}
-	ledger.path = blocked
-	err = ledger.put(newURL, []string{newURL}, Entry{Status: "archived", ArchiveURL: testSnapshot(newURL)})
-	if cooldownErr := ledger.setCooldown(testNow.Add(time.Hour)); cooldownErr == nil || !ledger.retryAt().IsZero() {
-		t.Fatal("Failed cooldown write changed in-memory state")
-	}
-	ledger.path = path
-	if err == nil {
-		t.Fatal("Expected atomic replacement failure")
-	}
-	after, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(before) != string(after) {
-		t.Fatal("Failed write changed the valid ledger")
-	}
-	if _, found := ledger.record(newURL); found {
-		t.Fatal("Failed write changed in-memory state")
-	}
-	files, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".archive-links-*.tmp"))
-	if err != nil || len(files) != 0 {
-		t.Fatalf("Temporary write files were left behind: %v, %v", files, err)
+	if len(r.ledger.data) != 0 {
+		t.Fatal("failed write changed in-memory progress")
 	}
 }
 
-func TestConcurrentLedgerWritesLoseNoResults(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	const count = 20
-	var workers sync.WaitGroup
-	for n := range count {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			url := fmt.Sprintf("https://example.com/%d", n)
-			if err := ledger.put(url, []string{url}, Entry{Status: "archived", ArchiveURL: testSnapshot(url)}); err != nil {
-				t.Errorf("Write failed: %v", err)
-			}
-		}()
+func TestCollectLinksNeverScansBackups(t *testing.T) {
+	r, _ := newTestRunner(t)
+	r.backups = "xoutlinks/backups"
+	for name, content := range map[string]string{
+		"index.html": `<a href="https://example.com/?a=1&amp;b=2#section">one</a><a href="/local">local</a><a href="mailto:test@example.com">mail</a>`,
+		"xoutlinks/backups/accidentally-added.html": `<a href="https://should-not-be-crawled.test/">backup</a>`,
+	} {
+		path := filepath.Join(r.root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	workers.Wait()
-	entries := testReadEntries(t, path)
-	if len(entries) != count {
-		t.Fatalf("Concurrent writes lost results: got %d, want %d", len(entries), count)
+	for _, args := range [][]string{{"init", "-q"}, {"add", "-f", "xoutlinks/backups/accidentally-added.html"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = r.root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git: %v: %s", err, out)
+		}
 	}
-	for n := range count {
-		url := fmt.Sprintf("https://example.com/%d", n)
-		if got := entries[url]; got.Status != "archived" || got.ArchiveURL != testSnapshot(url) {
-			t.Errorf("Incorrect concurrent result for %s: %+v", url, got)
+	links, err := collectLinks(r.root, r.backups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(links, []string{"https://example.com/?a=1&b=2#section"}) {
+		t.Fatalf("wrong links: %v", links)
+	}
+}
+
+func TestExclusionsRemainPrecise(t *testing.T) {
+	// Test explicit exclusions independently of the user's configured defaults.
+	previous := exclusions
+	exclusions = append(append([]linkRule{}, previous...),
+		linkRule{domain: "github.com", path: "/nhooyr/nhooyr.github.io"},
+		linkRule{domain: "wikipedia.org"}, linkRule{domain: "archive.org"})
+	t.Cleanup(func() { exclusions = previous })
+	for _, raw := range []string{
+		"https://github.com/nhooyr/nhooyr.github.io",
+		"https://WWW.GITHUB.COM/NHoOyR/NHoOyR.GITHUB.IO/blob/main/index.html",
+		"https://wikipedia.org", "https://en.m.wikipedia.org/wiki/Kaslo#History",
+		"https://archive.org", "https://WEB.ARCHIVE.ORG./web/test", "https://a.b.archive.org",
+	} {
+		if !excludedLink(raw) {
+			t.Errorf("expected exclusion: %s", raw)
+		}
+	}
+	for _, raw := range []string{
+		"https://github.com/nhooyr", "https://github.com/nhooyr/nhooyr.github.io-other",
+		"https://gist.github.com/nhooyr/nhooyr.github.io", "https://wikipedia.org.example.com",
+		"https://notarchive.org", "https://commons.wikimedia.org", "https://leqra.com",
+		"https://discord.gg/invite", "https://www.facebook.com/example", "https://www.linkedin.com/in/test",
+		"https://www.threads.com/example", "https://us05web.zoom.us/j/123?pwd=example",
+	} {
+		if excludedLink(raw) {
+			t.Errorf("unexpected exclusion: %s", raw)
 		}
 	}
 }
 
-func clearTestCredentials(t *testing.T) {
+func shellSaver(t *testing.T, body string) *singleFile {
 	t.Helper()
-	for _, name := range []string{"ARCHIVE_ORG_ACCESS_KEY", "ARCHIVE_ORG_SECRET_KEY", "IA_ACCESS_KEY", "IA_SECRET_KEY"} {
-		t.Setenv(name, "")
+	path := filepath.Join(t.TempDir(), "single-file")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nset -eu\n"+body), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return &singleFile{binary: path, chrome: "/installed/chrome"}
+}
+
+func TestSingleFileReusesCachedExecutable(t *testing.T) {
+	dir := t.TempDir()
+	s := &singleFile{chrome: "/bin/sh", cache: dir}
+	name := filepath.Join(dir, "single-file-"+singleFileVersion+"-"+runtime.GOOS+"-"+runtime.GOARCH)
+	if err := os.WriteFile(name, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if s.binary != name {
+		t.Fatalf("did not reuse cached executable: %s", s.binary)
 	}
 }
 
-func TestCredentialsFileOverridesEnvironment(t *testing.T) {
-	clearTestCredentials(t)
-	t.Setenv("ARCHIVE_ORG_ACCESS_KEY", "environment-access")
-	t.Setenv("ARCHIVE_ORG_SECRET_KEY", "environment-secret")
-	path := filepath.Join(t.TempDir(), "private-credentials.json")
-	if err := os.WriteFile(path, []byte(`{"access_key":"sample-access","secret_key":"sample-secret"}`), 0600); err != nil {
+func TestSingleFileArgumentsAndAtomicOutput(t *testing.T) {
+	s := shellSaver(t, `printf '<html>saved</html>' > "$2"
+printf '%s\n' "$@" > "$2.args"
+printf '{"response":{"status":200}}'
+`)
+	path := filepath.Join(t.TempDir(), "page.html")
+	raw := "https://example.com/?literal=$(false)&value=two"
+	if err := s.save(context.Background(), raw, path); err != nil {
 		t.Fatal(err)
 	}
-	client, err := newClient(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if client.authorization != "LOW sample-access:sample-secret" {
-		t.Fatal("Credentials file did not override the environment")
-	}
-}
-
-func TestInvalidCredentialsNeverEchoValues(t *testing.T) {
-	clearTestCredentials(t)
-	invalid := []string{
-		`{}`, `[]`, `null`, `"sample-secret"`, `17`,
-		`{"access_key":"sample-access"}`,
-		`{"access_key":"","secret_key":"sample-secret"}`,
-		`{"access_key":17,"secret_key":"sample-secret"}`,
-		`{"access_key":"sample-access","secret_key":false}`,
-		`{"secret_key":"sample-secret", malformed}`,
-	}
-	for n, content := range invalid {
-		t.Run(fmt.Sprint(n), func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "private-credentials.json")
-			if err := os.WriteFile(path, []byte(content), 0600); err != nil {
-				t.Fatal(err)
-			}
-			_, err := newClient(path)
-			if err == nil {
-				t.Fatal("Invalid credentials were accepted")
-			}
-			if strings.Contains(err.Error(), "sample-access") || strings.Contains(err.Error(), "sample-secret") {
-				t.Fatal("Credential values appeared in the validation error")
-			}
-		})
-	}
-}
-
-func TestKnownAuthFailureDoesNotCauseUnauthorizedHTTPPost(t *testing.T) {
-	clearTestCredentials(t)
-	ledger, path := newTestLedger(t)
-	old, newURL := "https://example.com/old", "https://example.com/new"
-	if err := ledger.put(old, []string{old}, Entry{Status: "needs_auth", ErrorMsg: "Credentials required"}); err != nil {
-		t.Fatal(err)
-	}
-	var gets, posts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
-			posts.Add(1)
-		} else {
-			gets.Add(1)
-		}
-		fmt.Fprint(w, `{"archived_snapshots":{}}`)
-	}))
-	defer server.Close()
-	client, err := newClient("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.httpClient, client.availabilityURL, client.saveURL = server.Client(), server.URL, server.URL
-	client.requestInterval, client.saveInterval = 0, 0
-	if err := testRun(t, ledger, client, []string{old, newURL}); !errors.Is(err, errIncomplete) {
-		t.Fatalf("Missing credentials should report incomplete work: %v", err)
-	}
-	if gets.Load() != 1 || posts.Load() != 0 {
-		t.Fatalf("Unexpected anonymous requests: %d GETs, %d POSTs", gets.Load(), posts.Load())
-	}
-	if got := testReadEntries(t, path)[newURL].Status; got != "needs_auth" {
-		t.Fatalf("New link did not retain auth requirement: %s", got)
-	}
-	if err := testRun(t, ledger, client, []string{old, newURL}); !errors.Is(err, errIncomplete) {
-		t.Fatalf("Missing credentials should still fail on repeat runs: %v", err)
-	}
-	if gets.Load() != 1 || posts.Load() != 0 {
-		t.Fatal("Repeat run made unnecessary HTTP requests")
-	}
-}
-
-func TestSaveFormPreservesURLWithoutCapturingOutlinks(t *testing.T) {
-	type requestDetails struct {
-		method, authorization, contentType string
-		form                               url.Values
-	}
-	details := make(chan requestDetails, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseForm(); err != nil {
-			t.Error(err)
-		}
-		details <- requestDetails{r.Method, r.Header.Get("Authorization"), r.Header.Get("Content-Type"), r.PostForm}
-		fmt.Fprint(w, `{"job_id":"form-job"}`)
-	}))
-	defer server.Close()
-	client := &Client{httpClient: server.Client(), saveURL: server.URL, authorization: "LOW sample-access:sample-secret"}
-	raw := "https://example.com/search?q=a%2Bb&name=caf%C3%A9&x=one%20two"
-	for _, force := range []bool{false, true} {
-		result, err := client.save(context.Background(), raw, force)
-		if err != nil || result.JobID != "form-job" {
-			t.Fatalf("Unexpected save result: %+v, %v", result, err)
-		}
-		got := <-details
-		if _, enabled := got.form["capture_outlinks"]; enabled {
-			t.Fatal("Save request must not enable outlink capture")
-		}
-		within := "3600"
-		if force {
-			within = "0"
-		}
-		want := url.Values{"url": {raw}, "skip_first_archive": {"1"}, "if_not_archived_within": {within}}
-		if !reflect.DeepEqual(got.form, want) || got.method != http.MethodPost || got.contentType != "application/x-www-form-urlencoded" {
-			t.Fatalf("Unexpected save request: %+v", got)
-		}
-		if got.authorization != "LOW sample-access:sample-secret" {
-			t.Fatal("Save request omitted authorization")
+	args := string(readFile(t, path+".part.html.args"))
+	for _, arg := range []string{raw, "--browser-executable-path=/installed/chrome", "--crawl-links=false", "--compress-content=false", "--block-scripts=true"} {
+		if !strings.Contains(args, arg+"\n") {
+			t.Errorf("missing capture argument %q: %s", arg, args)
 		}
 	}
-}
-
-func TestAvailabilityQueryPreservesOriginalURL(t *testing.T) {
-	original := "https://example.com/search?q=a%2Bb&next=https%3A%2F%2Fexample.org"
-	var requested string
-	var verified bool
-	client := &Client{availabilityURL: "https://archive.test/available", httpClient: &http.Client{Transport: testRoundTripper(func(r *http.Request) (*http.Response, error) {
-		body := ""
-		if r.Method == http.MethodHead {
-			if r.URL.String() != testSnapshot(original) {
-				t.Errorf("Unexpected replay URL: %s", r.URL)
-			}
-			verified = true
-		} else {
-			requested = r.URL.Query().Get("url")
-			body = fmt.Sprintf(`{"archived_snapshots":{"closest":{"available":true,"status":"200","url":%q}}}`, testSnapshot(original))
-		}
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
-	})}}
-	archive, err := client.available(context.Background(), original)
-	if err != nil || archive != testSnapshot(original) {
-		t.Fatalf("Unexpected availability result: %q, %v", archive, err)
+	if string(readFile(t, path)) != "<html>saved</html>" {
+		t.Fatal("completed capture was not published")
 	}
-	if requested != original || verified {
-		t.Fatalf("Availability request altered the URL or checked replay before preserving the index result: %q, %v", requested, verified)
+	if _, err := os.Stat(path + ".part.html"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("partial file was left behind")
 	}
 }
 
-type testRoundTripper func(*http.Request) (*http.Response, error)
-
-func (f testRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
-func TestMissingReplayResumesWithoutDuplicateCaptures(t *testing.T) {
-	for _, source := range []string{"availability", "job"} {
-		t.Run(source, func(t *testing.T) {
-			ledger, path := newTestLedger(t)
-			raw := "https://open.spotify.com/user/example?si=tracking"
-			if source == "job" {
-				if err := ledger.put(raw, []string{raw}, Entry{Status: "pending", JobID: "existing-job"}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			playable := false
-			var calls, saves int
-			client := &Client{availabilityURL: "https://archive.test/available", saveURL: "https://archive.test/save", authorization: "LOW test:test"}
-			client.httpClient = &http.Client{Transport: testRoundTripper(func(r *http.Request) (*http.Response, error) {
-				calls++
-				status, body := http.StatusOK, ""
-				switch {
-				case r.Method == http.MethodHead:
-					if r.URL.String() != testSnapshot(raw) || r.Header.Get("Authorization") != "" {
-						t.Errorf("Incorrect replay request: %s, %v", r.URL, r.Header)
-					}
-					if !playable {
-						status = http.StatusNotFound
-					}
-				case r.Method == http.MethodGet && r.URL.Path == "/available":
-					body = fmt.Sprintf(`{"archived_snapshots":{"closest":{"available":true,"status":"200","url":%q}}}`, testSnapshot(raw))
-				case r.Method == http.MethodGet && r.URL.Path == "/save/status/existing-job":
-					body = fmt.Sprintf(`{"status":"success","timestamp":%q,"original_url":%q}`, testTimestamp, raw)
-				case r.Method == http.MethodPost && r.URL.Path == "/save":
-					saves++
-					body = `{"job_id":"existing-job"}`
-				default:
-					t.Errorf("Unexpected request, possibly a duplicate capture: %s %s", r.Method, r.URL)
-					status = http.StatusBadRequest
-				}
-				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
-			})}
-			if err := testRun(t, ledger, client, []string{raw}); !errors.Is(err, errIncomplete) {
-				t.Fatalf("Unplayable snapshot was accepted: %v", err)
-			}
-			entry := testReadEntries(t, path)[raw]
-			if entry.Status != "replay_pending" || entry.ArchiveURL != testSnapshot(raw) || !strings.Contains(entry.ErrorMsg, "HTTP 404") || entry.permanentFailure() {
-				t.Fatalf("Unplayable snapshot was stored as successful or permanent: %+v", entry)
-			}
-			if entry.JobID != "" {
-				t.Fatalf("Completed capture should only poll its saved replay URL: %+v", entry)
-			}
-			loaded, err := loadLedgerAt(path, testNow)
-			if err != nil {
-				t.Fatal(err)
-			}
-			playable = true
-			if err := testRun(t, loaded, client, []string{raw}); err != nil {
-				t.Fatal(err)
-			}
-			if entry = testReadEntries(t, path)[raw]; entry.Status != "archived" || entry.ArchiveURL != testSnapshot(raw) || entry.ErrorMsg != "" {
-				t.Fatalf("Playable snapshot did not finish cleanly: %+v", entry)
-			}
-			wantCalls, wantSaves := 3, 0
-			if calls != wantCalls || saves != wantSaves {
-				t.Fatalf("Unexpected work: %d requests, %d saves; want %d requests, %d saves", calls, saves, wantCalls, wantSaves)
-			}
-			if err := testRun(t, loaded, client, []string{raw}); err != nil || calls != wantCalls {
-				t.Fatalf("Fresh snapshot caused unnecessary requests: %v, %d", err, calls)
-			}
-		})
-	}
-}
-
-func TestReplayVerificationRespectsRateLimits(t *testing.T) {
-	var requests, cooldowns int
-	client := &Client{onRateLimit: func(time.Time) error { cooldowns++; return nil }}
-	client.httpClient = &http.Client{Transport: testRoundTripper(func(r *http.Request) (*http.Response, error) {
-		requests++
-		status := http.StatusOK
-		if requests == 1 {
-			status = http.StatusTooManyRequests
-		}
-		return &http.Response{StatusCode: status, Header: http.Header{"Retry-After": {"0"}}, Body: http.NoBody, Request: r}, nil
-	})}
-	if err := client.verifyReplay(context.Background(), testSnapshot("https://example.com/page")); err != nil || requests != 2 || cooldowns != 1 {
-		t.Fatalf("Replay check ignored the shared rate limit: %v, %d requests, %d cooldowns", err, requests, cooldowns)
-	}
-}
-
-func TestReplayPollingPreservesSnapshotWithoutCredentials(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	raw := "https://example.com/page"
-	aliases := []string{raw, raw + "#section"}
-	entry := Entry{Status: "replay_pending", ArchiveURL: testSnapshot(raw)}
-	if err := ledger.put(raw, aliases, entry); err != nil {
-		t.Fatal(err)
-	}
-	var checks atomic.Int32
-	client := &fakeArchiveService{unauthenticated: true, verifyFn: func(_ context.Context, archive string) error {
-		if archive != entry.ArchiveURL {
-			t.Errorf("Replay URL changed: %s", archive)
-		}
-		switch checks.Add(1) {
-		case 1:
-			return errors.New("replay temporarily unavailable (HTTP status=403)")
-		case 2:
-			return errReplayNotFound
-		}
-		return nil
-	}}
-	r := runner{ledger: ledger, client: client, retryInterval: time.Millisecond, concurrency: 1}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := r.run(ctx, aliases); err != nil {
-		t.Fatal(err)
-	}
-	if checks.Load() != 3 || client.counts() != [3]int{} {
-		t.Fatalf("Replay polling performed other requests: %d checks, %v", checks.Load(), client.counts())
-	}
-	for raw, got := range testReadEntries(t, path) {
-		if got.Status != "archived" || got.ArchiveURL != testSnapshot(raw) || got.RetryAt != "" || got.Error != "" || got.ErrorMsg != "" {
-			t.Errorf("Replay completion lost the snapshot or clean state: %+v", got)
-		}
-	}
-}
-
-func TestSaveTimeoutIsNeverRetried(t *testing.T) {
-	var requests atomic.Int32
-	client := &Client{
-		saveURL: "https://example.test/save", authorization: "LOW sample-access:sample-secret",
-		httpClient: &http.Client{Transport: testRoundTripper(func(_ *http.Request) (*http.Response, error) {
-			requests.Add(1)
-			return nil, context.DeadlineExceeded
-		})},
-	}
-	_, err := client.save(context.Background(), "https://example.com/page", false)
-	if err == nil {
-		t.Fatal("Expected timeout")
-	}
-	if requests.Load() != 1 {
-		t.Fatalf("Ambiguous save was retried %d times", requests.Load())
-	}
-}
-
-func TestHTTPRateLimitWaitsThenRetries(t *testing.T) {
-	for _, method := range []string{http.MethodGet, http.MethodPost} {
-		t.Run(method, func(t *testing.T) {
-			var requests atomic.Int32
-			var retryAt time.Time
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if requests.Add(1) == 1 {
-					w.Header().Set("Retry-After", "1")
-					w.WriteHeader(http.StatusTooManyRequests)
-					return
-				}
-				fmt.Fprint(w, `{}`)
-			}))
-			defer server.Close()
-			client := &Client{httpClient: server.Client(), authorization: "LOW sample:secret"}
-			client.onRateLimit = func(until time.Time) error { retryAt = until; return nil }
-			var data url.Values
-			if method == http.MethodPost {
-				data = url.Values{"url": {"https://example.com/page"}}
-			}
-			var result map[string]any
-			if err := client.request(context.Background(), method, server.URL, data, &result); err != nil {
-				t.Fatal(err)
-			}
-			if requests.Load() != 2 || retryAt.IsZero() || time.Now().Before(retryAt) {
-				t.Fatalf("Rate-limited request did not wait and retry: %d requests, retryAt=%v", requests.Load(), retryAt)
-			}
-		})
-	}
-}
-
-func TestPendingJobContinuesPollingUntilFinished(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	pendingURL, newURL := "https://example.com/pending", "https://example.com/new"
-	entry := Entry{Status: "pending", JobID: "still-running"}
-	if err := ledger.put(pendingURL, []string{pendingURL}, entry); err != nil {
-		t.Fatal(err)
-	}
-	if err := ledger.put(newURL, []string{newURL}, Entry{Status: "ready"}); err != nil {
-		t.Fatal(err)
-	}
-	polls := 0
-	client := &fakeArchiveService{statusFn: func(_ context.Context, job string) (capture, error) {
-		if job == entry.JobID {
-			polls++
-			if polls <= 100 {
-				return capture{Status: "pending"}, nil
-			}
-			return capture{Status: "success", Timestamp: testTimestamp, OriginalURL: pendingURL}, nil
-		}
-		return capture{Status: "success", Timestamp: testTimestamp, OriginalURL: newURL}, nil
-	}}
-	r := runner{ledger: ledger, client: client, now: fixedTestTime, concurrency: 1}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if err := r.run(ctx, []string{pendingURL, newURL}); err != nil {
-		t.Fatal(err)
-	}
-	if got := client.counts(); got != [3]int{0, 1, 102} || polls != 101 {
-		t.Fatalf("Polling stopped early or resubmitted the pending job: %v, %d polls", got, polls)
-	}
-	for _, raw := range []string{pendingURL, newURL} {
-		if stored := testReadEntries(t, path)[raw]; stored.Status != "archived" || stored.ArchiveURL != testSnapshot(raw) {
-			t.Fatalf("Capture did not finish: %+v", stored)
-		}
-	}
-}
-
-func TestPendingJobWaitCanBeCanceledAndResumed(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	pendingURL, newURL := "https://example.com/pending", "https://example.com/new"
-	entry := Entry{Status: "pending", JobID: "job:" + pendingURL}
-	if err := ledger.put(pendingURL, []string{pendingURL}, entry); err != nil {
-		t.Fatal(err)
-	}
-	if err := ledger.put(newURL, []string{newURL}, Entry{Status: "ready"}); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	polls := 0
-	client := &fakeArchiveService{statusFn: func(context.Context, string) (capture, error) {
-		polls++
-		if polls == 100 {
-			cancel()
-		}
-		return capture{Status: "pending"}, nil
-	}}
-	r := runner{ledger: ledger, client: client, now: fixedTestTime, concurrency: 1}
-	if err := r.run(ctx, []string{pendingURL, newURL}); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Cancellation did not stop polling: %v", err)
-	}
-	if got := client.counts(); got != [3]int{0, 0, 100} {
-		t.Fatalf("Cancellation submitted new work or stopped polling early: %v", got)
-	}
-	stored := testReadEntries(t, path)[pendingURL]
-	if stored != entry {
-		t.Fatalf("Lost pending capture: %+v", stored)
-	}
-	resumed := &fakeArchiveService{}
-	if err := testRun(t, ledger, resumed, []string{pendingURL, newURL}); err != nil {
-		t.Fatal(err)
-	}
-	if got := resumed.counts(); got != [3]int{0, 1, 2} {
-		t.Fatalf("Resuming duplicated a pending submission: %v", got)
-	}
-}
-
-func TestHTTPServerErrorStopsSaveWithoutRetry(t *testing.T) {
-	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		w.WriteHeader(http.StatusBadGateway)
-	}))
-	defer server.Close()
-	client := &Client{httpClient: server.Client(), saveURL: server.URL, authorization: "LOW sample-access:sample-secret"}
-	_, err := client.save(context.Background(), "https://example.com/page", false)
-	var unavailable *serviceUnavailable
-	if !errors.As(err, &unavailable) || requests.Load() != 1 {
-		t.Fatalf("Server error did not halt the save without retry: %d requests, %v", requests.Load(), err)
-	}
-}
-
-func TestHTTP999IsNotRetried(t *testing.T) {
-	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost} {
-		t.Run(method, func(t *testing.T) {
-			var requests atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				requests.Add(1)
-				w.WriteHeader(999)
-			}))
-			defer server.Close()
-			client := &Client{httpClient: server.Client(), saveURL: server.URL, authorization: "LOW sample:secret"}
-			var data url.Values
-			if method == http.MethodPost {
-				data = url.Values{"url": {"https://example.com/page"}}
-			}
-			var result capture
-			err := client.request(context.Background(), method, server.URL, data, &result)
-			if err == nil || requests.Load() != 1 {
-				t.Fatalf("HTTP 999 was retried or accepted: %v, %d requests", err, requests.Load())
-			}
-			if entry := (Entry{Status: "replay_pending", ErrorMsg: err.Error()}); !entry.permanentFailure() {
-				t.Fatalf("HTTP 999 was not classified as permanent: %v", err)
-			}
-		})
-	}
-}
-
-func TestRetryAfterParsesSecondsAndHTTPDates(t *testing.T) {
-	now := time.Date(2026, 11, 18, 12, 34, 56, 0, time.UTC)
-	for _, test := range []struct {
-		name, value string
-		want        time.Time
-	}{
-		{"seconds", "300", now.Add(5 * time.Minute)},
-		{"zero", "0", now},
-		{"HTTP date", now.Add(10 * time.Minute).Format(http.TimeFormat), now.Add(10 * time.Minute)},
-		{"missing", "", now.Add(time.Minute)},
-		{"invalid", "invalid", now.Add(time.Minute)},
-		{"negative", "-1", now.Add(time.Minute)},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if got := parseRetryAfter(test.value, now); !got.Equal(test.want) {
-				t.Fatalf("Retry-After parsed to %s, want %s", got, test.want)
-			}
-		})
-	}
-}
-
-func TestFutureCooldownCanBeCanceledWithoutRequestsOrChanges(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	raw := "https://example.com/pending"
-	until := testNow.Add(time.Hour)
-	entry := Entry{Status: "pending", JobID: "keep-this-job"}
-	if err := ledger.put(raw, []string{raw}, entry); err != nil {
-		t.Fatal(err)
-	}
-	if err := ledger.setCooldown(until); err != nil {
-		t.Fatal(err)
-	}
-	ledger, err := loadLedgerAt(path, testNow)
-	if err != nil {
-		t.Fatal(err)
-	}
-	before, _ := os.ReadFile(path)
-	client := &fakeArchiveService{}
-	var output strings.Builder
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	r := runner{ledger: ledger, client: client, now: fixedTestTime, output: &output}
-	if err := r.run(ctx, []string{raw}); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Cooldown did not wait for cancellation: %v", err)
-	}
-	after, _ := os.ReadFile(path)
-	if client.counts() != [3]int{} || string(before) != string(after) {
-		t.Fatal("Canceled cooldown performed network work or changed the database")
-	}
-	want := "wayback rate limit; waiting until " + until.Local().Format("2006-01-02 15:04:05 MST") + ".\n"
-	if output.String() != want {
-		t.Fatalf("Startup cooldown message = %q, want %q", output.String(), want)
-	}
-}
-
-func TestLoadClearsExpiredCooldownWithoutChangingEntries(t *testing.T) {
-	for _, until := range []time.Time{testNow.Add(-time.Minute), testNow} {
-		t.Run(until.Format(time.RFC3339), func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "db.json")
-			entries := map[string]Entry{"https://example.com/pending": {Status: "pending", JobID: "keep-this-job", ErrorMsg: "keep this error"}}
-			if err := writeJSON(path, database{Version: databaseVersion, RetryAt: until.Format(time.RFC3339), Entries: entries}); err != nil {
-				t.Fatal(err)
-			}
-			ledger, err := loadLedgerAt(path, testNow)
-			if err != nil {
-				t.Fatal(err)
-			}
-			stored := testReadDatabase(t, path)
-			if !ledger.retryAt().IsZero() || stored.RetryAt != "" || !reflect.DeepEqual(stored.Entries, entries) {
-				t.Fatalf("Expired cooldown was not cleared cleanly: %+v", stored)
-			}
-			marker := time.Unix(1000000000, 0)
-			if err := os.Chtimes(path, marker, marker); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := loadLedgerAt(path, testNow); err != nil {
-				t.Fatal(err)
-			}
-			info, err := os.Stat(path)
-			if err != nil || !info.ModTime().Equal(marker) {
-				t.Fatalf("Loading a cleared database rewrote it: %v", err)
-			}
-		})
-	}
-}
-
-func TestCooldownCleanupPreservesNewerDeadline(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	until := testNow.Add(time.Hour)
-	if err := ledger.setCooldown(until); err != nil {
-		t.Fatal(err)
-	}
-	if err := ledger.clearExpiredCooldown(testNow); err != nil {
-		t.Fatal(err)
-	}
-	if !ledger.retryAt().Equal(until) || testReadDatabase(t, path).RetryAt != until.Format(time.RFC3339) {
-		t.Fatal("Cleanup removed a deadline that is still in the future")
-	}
-}
-
-func TestRateLimitPersistsCooldownWithoutLosingPendingJob(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	url := "https://example.com/pending"
-	until := testNow.Add(5 * time.Minute)
-	entry := Entry{Status: "pending", JobID: "keep-this-job"}
-	if err := ledger.put(url, []string{url}, entry); err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeArchiveService{statusFn: func(context.Context, string) (capture, error) {
-		return capture{}, &serviceUnavailable{message: "Rate limited", retryAt: until}
-	}}
-	err := testRun(t, ledger, client, []string{url})
-	var unavailable *serviceUnavailable
-	if !errors.As(err, &unavailable) {
-		t.Fatalf("Expected rate limit: %v", err)
-	}
-	stored := testReadEntries(t, path)[url]
-	if stored.Status != "pending" || stored.JobID != entry.JobID || testReadDatabase(t, path).RetryAt != until.Format(time.RFC3339) {
-		t.Fatalf("Cooldown did not preserve pending state: %+v", stored)
-	}
-	if !ledger.retryAt().Equal(until) {
-		t.Fatal("Persisted cooldown was not loaded")
-	}
-	before, _ := os.ReadFile(path)
-	counts := client.counts()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	r := runner{ledger: ledger, client: client, now: fixedTestTime}
-	if err := r.run(ctx, []string{url}); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Expected repeated run to wait during cooldown: %v", err)
-	}
-	after, _ := os.ReadFile(path)
-	if client.counts() != counts || string(before) != string(after) {
-		t.Fatal("Repeat during cooldown made requests or changed state")
-	}
-}
-
-func TestCooldownCanNeverBeShortened(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	url := "https://example.com/pending"
-	until := testNow.Add(10 * time.Minute)
-	if err := ledger.put(url, []string{url}, Entry{Status: "pending", JobID: "keep-this-job"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ledger.setCooldown(until); err != nil {
-		t.Fatal(err)
-	}
-	before, _ := os.ReadFile(path)
-	if err := ledger.setCooldown(until.Add(-5 * time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	after, _ := os.ReadFile(path)
-	if !ledger.retryAt().Equal(until) || string(before) != string(after) {
-		t.Fatal("Shorter retry interval changed the existing cooldown")
-	}
-}
-
-func TestRateLimitBeforeFirstResultRetainsGlobalCooldown(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	url := "https://example.com/new"
-	until := testNow.Add(5 * time.Minute)
-	client := &fakeArchiveService{availableFn: func(context.Context, string) (string, error) {
-		return "", &serviceUnavailable{message: "Rate limited", retryAt: until}
-	}}
-	if err := testRun(t, ledger, client, []string{url}); err == nil {
-		t.Fatal("Expected rate limit")
-	}
-	stored := testReadDatabase(t, path)
-	if stored.Entries[url].Status != "failed" || stored.Entries[url].ErrorMsg == "" || stored.RetryAt != until.Format(time.RFC3339) {
-		t.Fatalf("First rate limit lost its global cooldown: %+v", stored)
-	}
-	resumed := &fakeArchiveService{availableFn: func(context.Context, string) (string, error) {
-		return testSnapshot(url), nil
-	}}
-	r := runner{ledger: ledger, client: resumed, now: func() time.Time { return until.Add(time.Second) }}
-	if err := r.run(context.Background(), []string{url}); err != nil {
-		t.Fatalf("Expired cooldown did not allow the unprocessed link to run: %v", err)
-	}
-	if got := resumed.counts(); got != [3]int{1, 0, 0} {
-		t.Fatalf("Unexpected work after cooldown: %v", got)
-	}
-}
-
-func TestBlogSourceRepositoryIsExcludedPrecisely(t *testing.T) {
-	excluded := []string{
-		"https://github.com/nhooyr/nhooyr.github.io",
-		"https://github.com/nhooyr/nhooyr.github.io/",
-		"http://github.com/nhooyr/nhooyr.github.io?tab=readme#top",
-		"https://github.com/nhooyr/nhooyr.github.io/blob/main/index.html",
-		"https://WWW.GITHUB.COM/NHoOyR/NHoOyR.GITHUB.IO/tree/main",
-	}
-	retained := []string{
-		"https://github.com/nhooyr",
-		"https://github.com/nhooyr/dotfiles",
-		"https://github.com/nhooyr/nhooyr.github.io-other",
-		"https://github.com/other-user/nhooyr.github.io",
-		"https://github.com.evil.test/nhooyr/nhooyr.github.io",
-		"https://gist.github.com/nhooyr/nhooyr.github.io",
-	}
-	for _, raw := range excluded {
-		if !excludedLink(raw) {
-			t.Errorf("Blog source link was not excluded: %s", raw)
-		}
-	}
-	for _, raw := range retained {
-		if excludedLink(raw) {
-			t.Errorf("Unrelated GitHub link was excluded: %s", raw)
-		}
-	}
-}
-
-func TestWikipediaDomainsAreExcludedPrecisely(t *testing.T) {
-	excluded := []string{
-		"https://wikipedia.org",
-		"https://www.wikipedia.org/",
-		"https://en.wikipedia.org/wiki/Kaslo",
-		"https://fr.wikipedia.org/wiki/Paris",
-		"https://en.m.wikipedia.org/wiki/Kaslo?oldid=1#History",
-		"https://EN.WIKIPEDIA.ORG/wiki/Kaslo",
-		"http://m.wikipedia.org/",
-	}
-	retained := []string{
-		"https://notwikipedia.org/wiki/Kaslo",
-		"https://wikipedia.org.example.com/",
-		"https://en.wikipedia.org.evil.test/wiki/Kaslo",
-		"https://wikipedia.com/",
-		"https://commons.wikimedia.org/wiki/Kaslo",
-	}
-	var content strings.Builder
-	for _, raw := range excluded {
-		if !excludedLink(raw) {
-			t.Errorf("Wikipedia link was not excluded: %s", raw)
-		}
-		fmt.Fprintf(&content, "<a href=%q>excluded</a>", raw)
-	}
-	for _, raw := range retained {
-		if excludedLink(raw) {
-			t.Errorf("Unrelated domain was excluded: %s", raw)
-		}
-		fmt.Fprintf(&content, "<a href=%q>retained</a>", raw)
-	}
-	got, _ := filterLinks(extractLinks(content.String()))
-	sort.Strings(retained)
-	if !reflect.DeepEqual(got, retained) {
-		t.Fatalf("HTML extraction did not apply Wikipedia exclusions precisely: %v", got)
-	}
-}
-
-func TestAllOtherLinksRemainEligible(t *testing.T) {
-	for _, raw := range []string{
-		"https://leqra.com", "https://www.facebook.com/example", "https://instagram.com/example",
-		"https://discord.gg/invite", "http://m.me/example", "https://wa.me/example",
-		"https://signal.me/#example", "https://t.me/example", "https://snapchat.com/t/example",
-		"https://us05web.zoom.us/j/123?pwd=example", "https://open.spotify.com/user/example",
-		"https://www.youtube.com/watch?v=example", "https://www.reddit.com/user/example",
-		"https://chatgpt.com/u/example", "https://cplusplus.com/user/example",
-		"https://stackexchange.com/users/123/example", "https://powdertoy.co.uk/User.html?Name=example",
-		"https://github.com/search?q=involves%3Anhooyr&type=issues",
-		"https://www.linkedin.com/in/example", "https://www.threads.com/example",
-		"https://www.tiktok.com/@example", "https://www.pinterest.com/example", "https://x.com/example",
-		"https://www.flickr.com/people/example",
-	} {
-		if excludedLink(raw) {
-			t.Errorf("Unexpected exclusion: %s", raw)
-		}
-	}
-}
-
-func TestExcludedLinksArePrunedAndNeverRequested(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	excluded := []string{
-		"https://github.com/nhooyr/nhooyr.github.io/blob/main/index.html",
-		"https://en.wikipedia.org/wiki/Example",
-	}
-	for _, raw := range excluded {
-		if err := ledger.put(raw, []string{raw}, Entry{Status: "pending", JobID: "must-not-poll"}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	eligible := "https://leqra.com"
-	client := &fakeArchiveService{availableFn: func(_ context.Context, raw string) (string, error) {
-		return testSnapshot(raw), nil
-	}}
-	urls := append(append([]string(nil), excluded...), eligible)
-	if err := testRun(t, ledger, client, urls); err != nil {
-		t.Fatal(err)
-	}
-	if got := client.counts(); got != [3]int{1, 0, 0} || !reflect.DeepEqual(client.availableCalls, []string{eligible}) {
-		t.Fatalf("Excluded links caused requests: %v, %v", got, client.availableCalls)
-	}
-	entries := testReadEntries(t, path)
-	if len(entries) != 1 || entries[eligible].ArchiveURL != testSnapshot(eligible) {
-		t.Fatalf("Excluded records were retained or eligible record lost: %+v", entries)
-	}
-}
-
-func TestExcludedLedgerEntriesArePrunedWithoutRepeatWrites(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	excluded := []string{
-		"https://github.com/nhooyr/nhooyr.github.io",
-		"https://GitHub.Com/nhooyr/nhooyr.github.io?tab=readme",
-		"https://github.com/nhooyr/nhooyr.github.io/blob/main/index.html",
-		"https://en.wikipedia.org/wiki/Kaslo",
-		"https://en.m.wikipedia.org/wiki/Kaslo?oldid=1#History",
-	}
-	for _, raw := range excluded {
-		if err := ledger.put(raw, []string{raw}, Entry{Status: "archived", ArchiveURL: testSnapshot(raw)}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	retained := "https://github.com/other-user/project"
-	if err := ledger.put(retained, []string{retained}, Entry{Status: "archived", ArchiveURL: testSnapshot(retained)}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ledger.removeExcluded(); err != nil {
-		t.Fatal(err)
-	}
-	entries := testReadEntries(t, path)
-	if len(entries) != 1 || entries[retained].ArchiveURL != testSnapshot(retained) {
-		t.Fatalf("Pruning removed the wrong entries: %+v", entries)
-	}
-	for _, raw := range excluded {
-		if _, found := ledger.record(raw); found {
-			t.Errorf("Excluded entry remained in memory: %s", raw)
-		}
-	}
-	before, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	marker := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
-	if err := os.Chtimes(path, marker, marker); err != nil {
-		t.Fatal(err)
-	}
-	if err := ledger.removeExcluded(); err != nil {
-		t.Fatal(err)
-	}
-	after, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(before) != string(after) || !info.ModTime().Equal(marker) {
-		t.Fatal("Repeated pruning rewrote an unchanged ledger")
-	}
-}
-
-func TestRunnerSkipsExcludedLinksAndProcessesOtherLinks(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	old := "https://github.com/nhooyr/nhooyr.github.io"
-	if err := ledger.put(old, []string{old}, Entry{Status: "pending", JobID: "must-not-poll"}); err != nil {
-		t.Fatal(err)
-	}
-	oldWikipedia := "https://en.wikipedia.org/wiki/Kaslo"
-	if err := ledger.put(oldWikipedia, []string{oldWikipedia}, Entry{Status: "pending", JobID: "must-not-poll-wikipedia"}); err != nil {
-		t.Fatal(err)
-	}
-	eligible := "https://github.com/other-user/project"
-	client := &fakeArchiveService{availableFn: func(_ context.Context, raw string) (string, error) {
-		return testSnapshot(raw), nil
-	}}
-	urls := []string{
-		old, "https://github.com/nhooyr/nhooyr.github.io?tab=repositories", "https://github.com/nhooyr/nhooyr.github.io/tree/main",
-		oldWikipedia, "https://wikipedia.org", "https://en.m.wikipedia.org/wiki/Kaslo", eligible,
-	}
-	if err := testRun(t, ledger, client, urls); err != nil {
-		t.Fatal(err)
-	}
-	if got := client.counts(); got != [3]int{1, 0, 0} || !reflect.DeepEqual(client.availableCalls, []string{eligible}) {
-		t.Fatalf("Excluded links caused requests: calls %v, lookups %v", got, client.availableCalls)
-	}
-	entries := testReadEntries(t, path)
-	if len(entries) != 1 || entries[eligible].ArchiveURL != testSnapshot(eligible) {
-		t.Fatalf("Excluded records were retained or eligible record lost: %+v", entries)
-	}
-}
-
-func TestPruningOwnGitHubRecordPreservesGlobalCooldown(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	excluded, retained := "https://github.com/nhooyr/nhooyr.github.io", "https://example.com/pending"
-	until := testNow.Add(5 * time.Minute)
-	if err := ledger.put(excluded, []string{excluded}, Entry{Status: "pending", JobID: "excluded-job"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ledger.setCooldown(until); err != nil {
-		t.Fatal(err)
-	}
-	if err := ledger.put(retained, []string{retained}, Entry{Status: "pending", JobID: "retained-job"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ledger.removeExcluded(); err != nil {
-		t.Fatal(err)
-	}
-	entries := testReadEntries(t, path)
-	if len(entries) != 1 {
-		t.Fatalf("Excluded record remained after pruning: %+v", entries)
-	}
-	entry := entries[retained]
-	if entry.Status != "pending" || entry.JobID != "retained-job" || !ledger.retryAt().Equal(until) {
-		t.Fatalf("Pruning lost cooldown or altered the retained job: %+v", entry)
-	}
-	client := &fakeArchiveService{}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	r := runner{ledger: ledger, client: client, now: fixedTestTime}
-	if err := r.run(ctx, []string{retained}); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Pruning bypassed the active global cooldown: %v", err)
-	}
-	if got := client.counts(); got != [3]int{} {
-		t.Fatalf("Pruning led to requests during cooldown: %v", got)
-	}
-}
-
-func TestConcurrentRateLimitsPreserveLongestCooldown(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	urls := []string{"https://example.com/first", "https://example.com/second"}
-	for _, raw := range urls {
-		if err := ledger.put(raw, []string{raw}, Entry{Status: "pending", JobID: "job:" + raw}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	first := testNow.Add(5 * time.Minute)
-	longest := first.Add(5 * time.Minute)
-	started := make(chan struct{}, 2)
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	defer releaseOnce.Do(func() { close(release) })
-	client := &fakeArchiveService{statusFn: func(ctx context.Context, job string) (capture, error) {
-		started <- struct{}{}
-		select {
-		case <-release:
-		case <-ctx.Done():
-			return capture{}, ctx.Err()
-		}
-		if job == "job:"+urls[0] {
-			return capture{}, &serviceUnavailable{message: "First limit", retryAt: first}
-		}
-		// Concurrent requests can return different retry deadlines.
-		return capture{}, &serviceUnavailable{message: "Longer limit", retryAt: longest}
-	}}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	r := runner{ledger: ledger, client: client, now: fixedTestTime, concurrency: 2}
-	done := make(chan error, 1)
-	go func() { done <- r.run(ctx, urls) }()
-	for range 2 {
-		select {
-		case <-started:
-		case <-ctx.Done():
-			t.Fatal("Pending jobs did not start concurrently")
-		}
-	}
-	releaseOnce.Do(func() { close(release) })
-	err := <-done
-	var unavailable *serviceUnavailable
-	if !errors.As(err, &unavailable) || !unavailable.retryAt.Equal(longest) {
-		t.Fatalf("Longest Retry-After was lost: %v", err)
-	}
-	if !ledger.retryAt().Equal(longest) {
-		t.Fatal("Longest Retry-After was not persisted")
-	}
-	for _, raw := range urls {
-		entry := testReadEntries(t, path)[raw]
-		if entry.Status != "pending" || entry.JobID != "job:"+raw {
-			t.Errorf("Rate limit lost pending job %s: %+v", raw, entry)
-		}
-	}
-}
-
-func TestUnversionedDatabasePreservesEntries(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "db.json")
-	oldArchive := "https://web.archive.org/web/20100101000000/https://example.com/old"
-	legacy := map[string]Entry{
-		"https://example.com/old":      {Status: "archived", ArchiveURL: oldArchive},
-		"https://example.com/pending":  {Status: "pending", ArchiveURL: oldArchive, JobID: "existing-job"},
-		"https://example.com/failed":   {Status: "failed", ArchiveURL: oldArchive, ErrorMsg: "old error"},
-		"https://example.com/existing": {Status: "archived", ArchiveURL: oldArchive},
-		"https://example.com/unsaved":  {Status: "ready"},
-	}
-	content, err := json.Marshal(legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, content, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadLedgerAt(path, testNow); err != nil {
-		t.Fatal(err)
-	}
-	entries := testReadEntries(t, path)
-	for raw, original := range legacy {
-		if got := entries[raw]; got != original {
-			t.Errorf("Loading changed fields for %s: got %+v, want %+v", raw, got, original)
-		}
-	}
-	before, _ := os.ReadFile(path)
-	if _, err := loadLedgerAt(path, testNow.AddDate(0, 1, 0)); err != nil {
-		t.Fatal(err)
-	}
-	after, _ := os.ReadFile(path)
-	if string(before) != string(after) {
-		t.Fatal("Reloading a migrated database rewrote state")
-	}
-}
-
-func TestUnsupportedDatabaseVersionDoesNotRewriteFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "db.json")
-	content, err := json.Marshal(database{Version: databaseVersion + 1, Entries: map[string]Entry{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, content, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadLedgerAt(path, testNow); err == nil {
-		t.Fatal("Newer database version was accepted")
-	}
-	after, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(content) != string(after) {
-		t.Fatal("Unsupported database version was rewritten")
-	}
-}
-
-func TestKnownNeedsAuthWithoutCredentialsErrorsWithoutChanges(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	raw := "https://example.com/page"
-	entry := Entry{Status: "needs_auth", ErrorMsg: "Credentials required"}
-	if err := ledger.put(raw, []string{raw}, entry); err != nil {
-		t.Fatal(err)
-	}
-	before, _ := os.ReadFile(path)
-	client := &fakeArchiveService{unauthenticated: true}
-	if err := testRun(t, ledger, client, []string{raw}); !errors.Is(err, errIncomplete) {
-		t.Fatalf("Missing credentials should fail the run: %v", err)
-	}
-	after, _ := os.ReadFile(path)
-	if client.counts() != [3]int{} || string(before) != string(after) {
-		t.Fatal("Known authentication requirement caused requests or a file rewrite")
-	}
-}
-
-func TestCredentialsAutomaticallyResumeNeedsAuthWithoutLookup(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	raw := "https://example.com/page"
-	if err := ledger.put(raw, []string{raw}, Entry{Status: "needs_auth", ErrorMsg: "Credentials required"}); err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeArchiveService{}
-	if err := testRun(t, ledger, client, []string{raw}); err != nil {
-		t.Fatal(err)
-	}
-	if got := client.counts(); got != [3]int{0, 1, 1} {
-		t.Fatalf("Adding credentials repeated the lookup or failed to resume: %v", got)
-	}
-	if got := testReadEntries(t, path)[raw]; got.Status != "archived" || got.ArchiveURL != testSnapshot(raw) {
-		t.Fatalf("Authentication-resumed capture was not saved: %+v", got)
-	}
-}
-
-func TestPendingJobsStillPollWithoutCredentials(t *testing.T) {
-	ledger, _ := newTestLedger(t)
-	raw := "https://example.com/page"
-	if err := ledger.put(raw, []string{raw}, Entry{Status: "pending", JobID: "job:" + raw}); err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeArchiveService{unauthenticated: true}
-	if err := testRun(t, ledger, client, []string{raw}); err != nil || client.counts() != [3]int{0, 0, 1} {
-		t.Fatalf("Credentials prevented a submitted job from finishing: %v, %v", client.counts(), err)
-	}
-}
-
-func TestDeferredAuthenticationDoesNotHideOtherFailures(t *testing.T) {
-	ledger, _ := newTestLedger(t)
-	blocked, failed := "https://example.com/blocked", "https://example.com/failed"
-	if err := ledger.put(blocked, []string{blocked}, Entry{Status: "needs_auth", ErrorMsg: "Credentials required"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ledger.put(failed, []string{failed}, Entry{Status: "failed", ErrorMsg: "Capture failed"}); err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeArchiveService{unauthenticated: true}
-	if err := testRun(t, ledger, client, []string{blocked, failed}); !errors.Is(err, errIncomplete) {
-		t.Fatalf("Authentication deferral hid an actual failed capture: %v", err)
-	}
-	if client.counts() != [3]int{1, 0, 0} || !reflect.DeepEqual(client.availableCalls, []string{failed}) {
-		t.Fatal("Failed capture was not rechecked, or was submitted without credentials")
-	}
-}
-
-func TestAuthenticationRejectionReportsErrorAndDefersRemainingPosts(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	var posts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
-			posts.Add(1)
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		fmt.Fprint(w, `{"archived_snapshots":{}}`)
-	}))
-	defer server.Close()
-	client := &Client{httpClient: server.Client(), availabilityURL: server.URL, saveURL: server.URL, authorization: "LOW sample-access:sample-secret"}
-	urls := []string{"https://example.com/first", "https://example.com/second"}
-	r := runner{ledger: ledger, client: client, now: fixedTestTime, concurrency: 1}
-	if err := r.run(context.Background(), urls); !errors.Is(err, errIncomplete) {
-		t.Fatalf("Authentication rejection should report incomplete work: %v", err)
-	}
-	if posts.Load() != 1 || client.authenticated() {
-		t.Fatalf("Rejected credentials caused additional posts: %d", posts.Load())
-	}
-	for _, raw := range urls {
-		if got := testReadEntries(t, path)[raw].Status; got != "needs_auth" {
-			t.Errorf("Remaining capture was not deferred: %s: %s", raw, got)
-		}
-	}
-	_, err := client.save(context.Background(), "https://example.com/third", false)
-	var auth *authenticationError
-	if !errors.As(err, &auth) || posts.Load() != 1 {
-		t.Fatalf("Rejected client posted again: %d, %v", posts.Load(), err)
-	}
-}
-
-func TestStatusAuthenticationFailurePreservesJobForResume(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	raw := "https://example.com/page"
-	entry := Entry{
-		Status: "pending", JobID: "job:" + raw,
-		ArchiveURL: "https://web.archive.org/web/20100101000000/" + raw,
-	}
-	if err := ledger.put(raw, []string{raw}, entry); err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeArchiveService{unauthenticated: true, statusFn: func(context.Context, string) (capture, error) {
-		return capture{}, &authenticationError{message: "Credentials required for status"}
-	}}
-	if err := testRun(t, ledger, client, []string{raw}); !errors.Is(err, errIncomplete) {
-		t.Fatalf("Status authentication should report incomplete work: %v", err)
-	}
-	stored := testReadEntries(t, path)[raw]
-	if stored.Status != "needs_auth" || stored.JobID != entry.JobID || stored.ArchiveURL != entry.ArchiveURL {
-		t.Fatalf("Status authentication failure lost the pending job/backup: %+v", stored)
-	}
-	authenticated := &fakeArchiveService{}
-	if err := testRun(t, ledger, authenticated, []string{raw}); err != nil || authenticated.counts() != [3]int{0, 0, 1} {
-		t.Fatalf("Restored credentials resubmitted instead of polling: %v, %v", authenticated.counts(), err)
-	}
-}
-
-func TestHTTPStatusAuthenticationFailuresAreNotRetried(t *testing.T) {
-	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+func TestSingleFileRejectsHTTPErrorPages(t *testing.T) {
+	for _, status := range []int{401, 403, 404, 429, 500, 999} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
-			var requests atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				requests.Add(1)
-				w.WriteHeader(status)
-			}))
-			defer server.Close()
-			client := &Client{httpClient: server.Client(), saveURL: server.URL, authorization: "LOW sample-access:sample-secret"}
-			_, err := client.status(context.Background(), "existing-job")
-			var auth *authenticationError
-			if !errors.As(err, &auth) || requests.Load() != 1 || client.authenticated() {
-				t.Fatalf("Status authentication failure was misclassified or retried: %v, %d requests", err, requests.Load())
+			s := shellSaver(t, fmt.Sprintf(`printf '<html>error page</html>' > "$2"
+printf '{"response":{"status":%d,"statusText":"failed","headers":[{"name":"retry-after","value":"120"}]}}'
+`, status))
+			path := filepath.Join(t.TempDir(), "page.html")
+			err := s.save(context.Background(), "https://example.com", path)
+			var failure *captureError
+			if !errors.As(err, &failure) || !strings.Contains(failure.message, fmt.Sprintf("HTTP status=%d", status)) {
+				t.Fatalf("wrong error: %v", err)
+			}
+			if status == 429 && !failure.retryAt.After(time.Now().Add(time.Minute)) {
+				t.Fatal("retry-after was not retained")
+			}
+			for _, name := range []string{path, path + ".part.html"} {
+				if _, err := os.Stat(name); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("error page was left as a backup: %s", name)
+				}
 			}
 		})
 	}
 }
 
-func TestSavedCooldownWaitsThenResumesPendingJob(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	raw := "https://example.com/pending"
-	until := time.Now().Add(40 * time.Millisecond)
-	entry := Entry{Status: "pending", JobID: "existing-job"}
-	if err := ledger.put(raw, []string{raw}, entry); err != nil {
-		t.Fatal(err)
-	}
-	if err := ledger.setCooldown(until); err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeArchiveService{statusFn: func(context.Context, string) (capture, error) {
-		if time.Now().Before(until) {
-			t.Error("Polled before the saved cooldown ended")
-		}
-		if !ledger.retryAt().IsZero() || testReadDatabase(t, path).RetryAt != "" {
-			t.Error("Expired saved cooldown was not cleared before resuming")
-		}
-		return capture{Status: "success", Timestamp: testTimestamp, OriginalURL: raw}, nil
-	}}
-	r := runner{ledger: ledger, client: client, concurrency: 1}
-	if err := r.run(context.Background(), []string{raw}); err != nil {
-		t.Fatal(err)
-	}
-	if client.counts() != [3]int{0, 0, 1} {
-		t.Fatalf("Pending job was resubmitted: %v", client.counts())
-	}
-}
-
-func TestRateLimitPausesOtherRequests(t *testing.T) {
-	var firstRequests atomic.Int32
-	otherStarted := make(chan time.Time, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/first" && firstRequests.Add(1) == 1 {
-			w.Header().Set("Retry-After", "1")
-			w.WriteHeader(http.StatusTooManyRequests)
-			return
-		}
-		if r.URL.Path == "/other" {
-			otherStarted <- time.Now()
-		}
-		fmt.Fprint(w, `{}`)
-	}))
-	defer server.Close()
-	limited := make(chan time.Time, 1)
-	client := &Client{httpClient: server.Client(), onRateLimit: func(until time.Time) error {
-		limited <- until
-		return nil
-	}}
-	done := make(chan error, 1)
-	go func() {
-		var result map[string]any
-		done <- client.request(context.Background(), http.MethodGet, server.URL+"/first", nil, &result)
-	}()
-	until := <-limited
-	var result map[string]any
-	if err := client.request(context.Background(), http.MethodGet, server.URL+"/other", nil, &result); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	if started := <-otherStarted; started.Before(until) {
-		t.Fatalf("Another request started during the global cooldown: %v < %v", started, until)
-	}
-}
-
-func TestRateLimitedPendingJobWaitsAndKeepsItsID(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	raw := "https://example.com/pending"
-	if err := ledger.put(raw, []string{raw}, Entry{Status: "pending", JobID: "existing-job"}); err != nil {
-		t.Fatal(err)
-	}
-	var gets, posts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
-			posts.Add(1)
-		}
-		if gets.Add(1) == 1 {
-			w.Header().Set("Retry-After", "1")
-			w.WriteHeader(http.StatusTooManyRequests)
-			return
-		}
-		if r.URL.Path != "/status/existing-job" {
-			t.Errorf("Unexpected job request: %s", r.URL.Path)
-		}
-		fmt.Fprintf(w, `{"status":"success","timestamp":%q,"original_url":%q}`, testTimestamp, raw)
-	}))
-	defer server.Close()
-	client := &Client{httpClient: server.Client(), saveURL: server.URL}
-	transport := client.httpClient.Transport
-	client.httpClient.Transport = testRoundTripper(func(r *http.Request) (*http.Response, error) {
-		if r.Method == http.MethodHead {
-			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}, nil
-		}
-		return transport.RoundTrip(r)
-	})
-	client.onRateLimit = func(until time.Time) error {
-		stored := testReadEntries(t, path)[raw]
-		if stored.Status != "pending" || stored.JobID != "existing-job" || testReadDatabase(t, path).RetryAt == "" {
-			t.Errorf("Rate limit lost its job or cooldown: %+v", stored)
-		}
-		return nil
-	}
-	r := runner{ledger: ledger, client: client, concurrency: 1}
-	if err := r.run(context.Background(), []string{raw}); err != nil {
-		t.Fatal(err)
-	}
-	if gets.Load() != 2 || posts.Load() != 0 {
-		t.Fatalf("Pending capture was resubmitted: %d GETs, %d POSTs", gets.Load(), posts.Load())
-	}
-	stored := testReadEntries(t, path)[raw]
-	if stored.Status != "archived" || stored.Error != "" || stored.ErrorMsg != "" {
-		t.Fatalf("Completion retained retry or error metadata: %+v", stored)
-	}
-	if testReadDatabase(t, path).RetryAt != "" {
-		t.Fatal("Completed rate-limit wait left an expired global cooldown")
-	}
-}
-
-func TestSuccessfulEntriesClearRetryAndError(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	base := "https://example.com/page"
-	aliases := []string{base, base + "#section"}
-	until := testNow.Add(time.Hour).Format(time.RFC3339)
-	if err := ledger.put(base, aliases, Entry{Status: "pending", JobID: "existing-job", ErrorMsg: "old error"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ledger.setCooldown(testNow.Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	archived := Entry{Status: "archived", ArchiveURL: testSnapshot(base)}
-	dirty := archived
-	dirty.Error, dirty.ErrorMsg, dirty.RetryAt = "error:old", "old error", until
-	if err := ledger.put(base, aliases, dirty); err != nil {
-		t.Fatal(err)
-	}
-	for raw, entry := range testReadEntries(t, path) {
-		want := archived
-		if _, fragment := splitFragment(raw); fragment != "" {
-			want.ArchiveURL += "#" + fragment
-		}
-		if entry != want {
-			t.Errorf("Successful entry retained obsolete metadata: %+v", entry)
-		}
-	}
-	if !ledger.retryAt().Equal(testNow.Add(time.Hour)) || testReadDatabase(t, path).RetryAt != until {
-		t.Fatal("Completing work lost the global cooldown")
-	}
-	content, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Count(string(content), `"retry_at"`) != 1 || strings.Contains(string(content), `"error"`) || strings.Contains(string(content), `"error_msg"`) {
-		t.Fatal("Retry metadata was not exclusively global, or completed errors remained")
-	}
-}
-
-func TestSuccessfulEntryPreservesGlobalCooldown(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	completed, pending := "https://example.com/a", "https://example.com/b"
-	until := testNow.Add(time.Hour)
-	for _, raw := range []string{completed, pending} {
-		if err := ledger.put(raw, []string{raw}, Entry{Status: "pending", JobID: "job:" + raw}); err != nil {
+func TestSingleFileFailurePreservesExistingBackup(t *testing.T) {
+	for _, body := range []string{
+		`printf 'partial' > "$2"; printf 'full error details\n' >&2; exit 1`,
+		`printf '{"response":{"status":200}}'; : > "$2"`,
+		`printf '<html>partial</html>' > "$2"; printf 'not JSON'`,
+	} {
+		s := shellSaver(t, body)
+		path := filepath.Join(t.TempDir(), "page.html")
+		if err := os.WriteFile(path, []byte("old backup"), 0644); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if err := ledger.setCooldown(until); err != nil {
-		t.Fatal(err)
-	}
-	if err := ledger.put(completed, []string{completed}, Entry{Status: "archived", ArchiveURL: testSnapshot(completed)}); err != nil {
-		t.Fatal(err)
-	}
-	entries := testReadEntries(t, path)
-	if entry := entries[completed]; entry.Error != "" || entry.ErrorMsg != "" {
-		t.Fatalf("Successful entry retained obsolete metadata: %+v", entry)
-	}
-	if entry := entries[pending]; entry.Status != "pending" || entry.JobID != "job:"+pending {
-		t.Fatalf("Completing a URL altered pending work: %+v", entry)
-	}
-	if testReadDatabase(t, path).RetryAt != until.Format(time.RFC3339) {
-		t.Fatal("Completing a URL lost the global cooldown")
+		if err := s.save(context.Background(), "https://example.com", path); err == nil {
+			t.Fatal("invalid capture was accepted")
+		}
+		if string(readFile(t, path)) != "old backup" {
+			t.Fatal("failed save replaced the existing backup")
+		}
 	}
 }
 
-func TestLoadingPreservesSeparateErrorFields(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "db.json")
-	completed, pending := "https://example.com/a", "https://example.com/b"
-	until := testNow.Add(2 * time.Hour).Format(time.RFC3339)
-	archived := Entry{Status: "archived", ArchiveURL: testSnapshot(completed)}
-	dirty := archived
-	dirty.ErrorMsg = "old error"
-	message := "Full diagnostic: additional details.\nSecond line."
-	unfinished := Entry{Status: "pending", JobID: "existing-job", Error: "error:no-request", ErrorMsg: message, RetryAt: until}
-	if err := writeJSON(path, database{Version: databaseVersion, RetryAt: until, Entries: map[string]Entry{completed: dirty, pending: unfinished}}); err != nil {
-		t.Fatal(err)
+func TestSingleFileCancellationCleansPartialOutput(t *testing.T) {
+	s := shellSaver(t, `printf 'partial' > "$2"; sleep 30`)
+	path := filepath.Join(t.TempDir(), "page.html")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if err := s.save(ctx, "https://example.com", path); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected cancellation: %v", err)
 	}
-	if _, err := loadLedgerAt(path, testNow); err != nil {
-		t.Fatal(err)
-	}
-	entries := testReadEntries(t, path)
-	if entries[completed] != archived {
-		t.Fatalf("Existing successful entry was not cleaned: %+v", entries[completed])
-	}
-	if entries[pending] != unfinished {
-		t.Fatalf("Cleanup altered unfinished work: %+v", entries[pending])
-	}
-	if testReadDatabase(t, path).RetryAt != until {
-		t.Fatal("Loading error fields altered the global cooldown")
-	}
-	marker := time.Unix(1000000000, 0)
-	if err := os.Chtimes(path, marker, marker); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadLedgerAt(path, testNow); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(path)
-	if err != nil || !info.ModTime().Equal(marker) {
-		t.Fatalf("Reloading a clean database rewrote it: %v", err)
+	if _, err := os.Stat(path + ".part.html"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("cancellation left a partial backup")
 	}
 }
 
-func TestRateLimitWaitCanBeCanceledAndCooldownSurvives(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	raw := "https://example.com/pending"
-	entry := Entry{Status: "pending", JobID: "existing-job", ArchiveURL: testSnapshot(raw)}
-	if err := ledger.put(raw, []string{raw}, entry); err != nil {
-		t.Fatal(err)
+func TestChromeCaptureIntegration(t *testing.T) {
+	binary := os.Getenv("SINGLE_FILE_TEST_BIN")
+	if binary == "" {
+		t.Skip("set SINGLE_FILE_TEST_BIN to test the installed Chrome and SingleFile")
 	}
-	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		w.Header().Set("Retry-After", "3600")
-		w.WriteHeader(http.StatusTooManyRequests)
+	var crawled atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, `<!doctype html><html><head><link rel="stylesheet" href="/style.css"></head><body>
+<h1>local capture test</h1><img src="/image.png"><a href="/do-not-crawl">external page</a>
+<script>document.body.insertAdjacentHTML("beforeend","<p>rendered-by-javascript</p>")</script></body></html>`)
+		case "/style.css":
+			w.Header().Set("Content-Type", "text/css")
+			fmt.Fprint(w, "h1 {color: rgb(10, 20, 30)}")
+		case "/image.png":
+			w.Header().Set("Content-Type", "image/png")
+			data, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aR1sAAAAASUVORK5CYII=")
+			w.Write(data)
+		case "/do-not-crawl":
+			crawled.Add(1)
+			fmt.Fprint(w, "should not be requested")
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
 	}))
 	defer server.Close()
-	ctx, cancel := context.WithCancel(context.Background())
+	s := &singleFile{binary: binary}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	client := &Client{httpClient: server.Client(), saveURL: server.URL, onRateLimit: func(time.Time) error {
-		cancel()
-		return nil
-	}}
-	r := runner{ledger: ledger, client: client, concurrency: 1}
-	if err := r.run(ctx, []string{raw}); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Expected cancellation during rate-limit wait: %v", err)
-	}
-	stored := testReadEntries(t, path)[raw]
-	if requests.Load() != 1 || stored.Status != "pending" || stored.JobID != entry.JobID || stored.ArchiveURL != entry.ArchiveURL || testReadDatabase(t, path).RetryAt == "" {
-		t.Fatalf("Cancellation lost pending state or retried: %+v, %d requests", stored, requests.Load())
-	}
-}
-
-func TestLongerCooldownExtendsAnExistingWait(t *testing.T) {
-	var gate paceGate
-	gate.postpone(time.Now().Add(30 * time.Millisecond))
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- gate.wait(ctx, 0) }()
-	later := time.Now().Add(70 * time.Millisecond)
-	gate.postpone(later)
-	if err := <-done; err != nil {
+	if err := s.prepare(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if time.Now().Before(later) {
-		t.Fatal("Wait ignored the extended cooldown")
+	path := filepath.Join(t.TempDir(), "capture.html")
+	if err := s.save(ctx, server.URL, path); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestArchiveDomainsAreExcludedPrecisely(t *testing.T) {
-	for _, raw := range []string{
-		"https://archive.org",
-		"https://archive.org/details/example",
-		"https://ARCHIVE.ORG./details/example",
-		"https://web.archive.org",
-		"http://web.archive.org/",
-		"https://WEB.ARCHIVE.ORG./web/20261118000000/https://example.com/",
-		"https://web.archive.org/save/https://example.com/",
-		"https://notweb.archive.org/",
-		"https://foo.bar.archive.org/anything",
-	} {
-		if !excludedLink(raw) {
-			t.Errorf("Internet Archive URL was not excluded: %s", raw)
+	content := string(readFile(t, path))
+	for _, want := range []string{"local capture test", "rendered-by-javascript", "data:image/png"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("saved page lacks %q", want)
 		}
 	}
-	for _, raw := range []string{
-		"https://notarchive.org/",
-		"https://archive.org.example.com/",
-		"https://web.archive.org.example.com/",
-		"https://example.com/archive.org",
-	} {
-		if excludedLink(raw) {
-			t.Errorf("Unrelated URL was excluded: %s", raw)
-		}
+	if strings.Contains(content, "document.body.insertAdjacentHTML") {
+		t.Fatal("the original executable script was retained")
+	}
+	if crawled.Load() != 0 {
+		t.Fatalf("crawled outlinks %d times", crawled.Load())
+	}
+	err := s.save(ctx, server.URL+"/missing", filepath.Join(t.TempDir(), "404.html"))
+	var failure *captureError
+	if !errors.As(err, &failure) || !strings.Contains(failure.message, "HTTP status=404") {
+		t.Fatalf("real Chrome HTTP failure was not detected: %v", err)
 	}
 }

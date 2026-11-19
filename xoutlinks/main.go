@@ -1,10 +1,6 @@
-// Archive external blog links and retain their Wayback URLs in xoutlinks/db.json.
+// Save external blog links as self-contained HTML using SingleFile and Chrome.
 // Run from the blog root: ./xoutlinks/run.sh
-// Failed links are retried by default. Completed archives are reused;
-// pending jobs and replay checks resume without resubmission.
-// Set ARCHIVE_ORG_ACCESS_KEY and ARCHIVE_ORG_SECRET_KEY before saving new pages.
-// Entries waiting for credentials resume automatically when credentials exist.
-// Rate-limit cooldowns are saved in the ledger and honored by later runs.
+// The first argument selects the output directory; xoutlinks/db.json records progress.
 package main
 
 import (
@@ -23,48 +19,44 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
 	"golang.org/x/net/html"
 )
 
-var archivePattern = regexp.MustCompile(`^https?://web\.archive\.org/web/([0-9]{14})/https?://.+$`)
-var errIncomplete = errors.New("some links are not archived; see xoutlinks/db.json")
-var errReplayNotFound = errors.New("wayback replay returned HTTP 404")
+const databaseVersion = 2
+const singleFileVersion = "2.27.3"
 
-const databaseVersion = 1
-const blockedURLError = "error:blocked-url"
+var errIncomplete = errors.New("some links are not saved; see xoutlinks/db.json")
 
 type database struct {
 	Version int              `json:"version"`
-	RetryAt string           `json:"retry_at,omitempty"`
 	Entries map[string]Entry `json:"entries"`
 }
 
 type Entry struct {
 	Status         string `json:"status"`
-	ArchiveURL     string `json:"archive_url,omitempty"`
-	JobID          string `json:"job_id,omitempty"`
+	File           string `json:"file,omitempty"`
+	SavedAt        string `json:"saved_at,omitempty"`
+	PendingFile    string `json:"pending_file,omitempty"`
+	ArchiveURL     string `json:"archive_url,omitempty"` // Retain previously collected Wayback URLs.
 	Error          string `json:"error,omitempty"`
 	ErrorMsg       string `json:"error_msg,omitempty"`
 	RetryAt        string `json:"retry_at,omitempty"`
 	ForceRearchive bool   `json:"force_rearchive,omitempty"`
-	// Persist the forced request boundary so interrupted saves can be recovered.
-	RearchiveStartedAt string `json:"rearchive_started_at,omitempty"`
 }
 
 func (e Entry) errorText() string {
 	if e.Error == "" {
 		return e.ErrorMsg
 	}
-	if e.ErrorMsg == "" || e.ErrorMsg == e.Error {
+	if e.ErrorMsg == "" || e.Error == e.ErrorMsg {
 		return e.Error
 	}
 	return e.Error + ": " + e.ErrorMsg
@@ -74,7 +66,7 @@ type Ledger struct {
 	mu       sync.Mutex
 	path     string
 	data     map[string]Entry
-	cooldown time.Time
+	excluded []string
 }
 
 func splitFragment(raw string) (string, string) {
@@ -135,7 +127,7 @@ func sortedKeys[V any](values map[string]V) []string {
 	return keys
 }
 
-func collectLinks(root string) ([]string, error) {
+func collectLinks(root, backups string) ([]string, error) {
 	command := exec.Command("git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.html")
 	command.Dir = root
 	files, err := command.Output()
@@ -144,7 +136,8 @@ func collectLinks(root string) ([]string, error) {
 	}
 	seen := make(map[string]bool)
 	for _, name := range strings.Split(string(files), "\x00") {
-		if name == "" {
+		// Never crawl downloaded pages, even if one was accidentally added to Git.
+		if name == "" || strings.HasPrefix(filepath.ToSlash(name), backups+"/") {
 			continue
 		}
 		content, err := os.ReadFile(filepath.Join(root, name))
@@ -177,16 +170,12 @@ func lockRepo(root string) (func(), error) {
 	}
 	if err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		file.Close()
-		return nil, fmt.Errorf("another archive-links process is already running: %w", err)
+		return nil, fmt.Errorf("another xoutlinks process is already running: %w", err)
 	}
 	return func() { file.Close() }, nil
 }
 
 func loadLedger(path string) (*Ledger, error) {
-	return loadLedgerAt(path, time.Now())
-}
-
-func loadLedgerAt(path string, now time.Time) (*Ledger, error) {
 	l := &Ledger{path: path, data: make(map[string]Entry)}
 	content, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -195,127 +184,94 @@ func loadLedgerAt(path string, now time.Time) (*Ledger, error) {
 	if err != nil {
 		return nil, err
 	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(content, &fields); err != nil || fields == nil {
-		return nil, fmt.Errorf("invalid archive ledger %s", path)
+	var stored database
+	if err := json.Unmarshal(content, &stored); err != nil || stored.Entries == nil {
+		return nil, fmt.Errorf("invalid backup database %s", path)
 	}
-	_, versioned := fields["version"]
-	if versioned {
-		var stored database
-		if err := json.Unmarshal(content, &stored); err != nil || stored.Entries == nil {
-			return nil, fmt.Errorf("invalid archive ledger %s", path)
-		}
-		if stored.Version != databaseVersion {
-			return nil, fmt.Errorf("unsupported archive database version %d", stored.Version)
-		}
-		l.data = stored.Entries
-		if stored.RetryAt != "" {
-			l.cooldown, err = time.Parse(time.RFC3339Nano, stored.RetryAt)
-			if err != nil {
-				return nil, fmt.Errorf("invalid global retry_at in %s", path)
-			}
-		}
-	} else if err := json.Unmarshal(content, &l.data); err != nil || l.data == nil {
-		return nil, fmt.Errorf("invalid legacy archive ledger %s", path)
+	if stored.Version != 1 && stored.Version != databaseVersion {
+		return nil, fmt.Errorf("unsupported backup database version %d", stored.Version)
 	}
-	rewrite := !versioned
-	for raw, entry := range l.data {
-		if normalized := normalizeFailure(raw, entry); normalized != entry {
-			entry, rewrite = normalized, true
+	rewrite := stored.Version != databaseVersion
+	for raw, entry := range stored.Entries {
+		if stored.Version == 1 {
+			// Wayback success, blocking, jobs and cooldowns say nothing about a local capture.
+			entry = Entry{Status: "ready", ArchiveURL: entry.ArchiveURL, ForceRearchive: entry.ForceRearchive}
 		}
-		if entry.Status == "" || ((entry.Status == "archived" || entry.Status == "replay_pending") && !archivePattern.MatchString(entry.ArchiveURL)) {
-			return nil, fmt.Errorf("invalid archive ledger entry: %s", raw)
+		switch entry.Status {
+		case "ready", "saving", "saved", "failed", "blocked":
+		default:
+			return nil, fmt.Errorf("invalid backup status for %s: %s", raw, entry.Status)
 		}
-		for _, timestamp := range []string{entry.RetryAt, entry.RearchiveStartedAt} {
+		for _, timestamp := range []string{entry.RetryAt, entry.SavedAt} {
 			if timestamp != "" {
 				if _, err := time.Parse(time.RFC3339Nano, timestamp); err != nil {
-					return nil, fmt.Errorf("invalid archive timestamp for %s", raw)
+					return nil, fmt.Errorf("invalid backup timestamp for %s", raw)
 				}
 			}
 		}
-		if entry.Status == "archived" && (entry.Error != "" || entry.ErrorMsg != "" || entry.RetryAt != "") {
-			entry.Error, entry.ErrorMsg, entry.RetryAt = "", "", ""
-			rewrite = true
-		} else if entry.permanentFailure() && (entry.Status != "blocked" || entry.JobID != "" || entry.RetryAt != "" || entry.RearchiveStartedAt != "") {
-			entry.Status, entry.JobID, entry.RetryAt = "blocked", "", ""
-			entry.ForceRearchive = entry.ForceRearchive && entry.RearchiveStartedAt == ""
-			entry.RearchiveStartedAt = ""
-			rewrite = true
+		for _, name := range []string{entry.File, entry.PendingFile} {
+			if name != "" && (!filepath.IsLocal(name) || !strings.HasSuffix(name, ".html")) {
+				return nil, fmt.Errorf("invalid backup filename for %s", raw)
+			}
 		}
+		previous := entry
+		if entry.Status == "saved" {
+			entry.Error, entry.ErrorMsg, entry.RetryAt = "", "", ""
+		} else if !entry.ForceRearchive {
+			entry = normalizeFailure(raw, entry)
+			if entry.permanentFailure() {
+				entry.Status, entry.PendingFile, entry.RetryAt = "blocked", "", ""
+			}
+		}
+		if until, err := time.Parse(time.RFC3339Nano, entry.RetryAt); err == nil && !until.After(time.Now()) {
+			entry.RetryAt = ""
+		}
+		rewrite = rewrite || entry != previous
 		l.data[raw] = entry
 	}
-	if !l.cooldown.IsZero() && !l.cooldown.After(now) {
-		l.cooldown = time.Time{}
-		rewrite = true
-	}
 	if rewrite {
-		if err := l.write(l.data, l.cooldown); err != nil {
-			return nil, fmt.Errorf("update archive database: %w", err)
+		if err := l.write(l.data); err != nil {
+			return nil, err
 		}
 	}
 	return l, nil
 }
 
-func transition(entry Entry, status string) Entry {
-	entry.Status, entry.JobID, entry.Error, entry.ErrorMsg = status, "", "", ""
-	entry.RetryAt = ""
-	return entry
-}
-
-func (l *Ledger) record(base string) (Entry, bool) {
+func (l *Ledger) record(base string) Entry {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	var forced Entry
-	var forcedKey string
-	for raw, entry := range l.data {
-		if !entry.ForceRearchive {
-			continue
-		}
-		if candidate, _ := splitFragment(raw); candidate != base {
-			continue
-		}
-		if forcedKey == "" || raw == base || (forcedKey != base && raw < forcedKey) {
-			forced, forcedKey = entry, raw
-		}
-	}
-	if forcedKey != "" {
-		forced.ArchiveURL, _ = splitFragment(forced.ArchiveURL)
-		return forced, true
-	}
-	if entry, ok := l.data[base]; ok && entry.Status == "archived" {
-		entry.ArchiveURL, _ = splitFragment(entry.ArchiveURL)
-		return entry, true
-	}
 	var result Entry
-	found := false
+	best := -1
 	for _, raw := range sortedKeys(l.data) {
 		if candidate, _ := splitFragment(raw); candidate != base {
 			continue
 		}
 		entry := l.data[raw]
-		if !found || entry.Status == "archived" {
-			result, found = entry, true
+		score := 0
+		if raw == base {
+			score++
 		}
-		if result.Status == "archived" {
-			break
+		if entry.Status == "saved" {
+			score += 2
+		}
+		if entry.PendingFile != "" {
+			score += 4
+		}
+		if entry.ForceRearchive {
+			score += 8
+		}
+		if score > best {
+			result, best = entry, score
 		}
 	}
 	result.ArchiveURL, _ = splitFragment(result.ArchiveURL)
-	return result, found
+	return result
 }
 
 func (l *Ledger) put(base string, aliases []string, entry Entry) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	entry = normalizeFailure(base, entry)
-	if entry.Status == "archived" {
-		entry.Error, entry.ErrorMsg, entry.RetryAt = "", "", ""
-	} else if entry.permanentFailure() {
-		entry.Status, entry.JobID, entry.RetryAt = "blocked", "", ""
-		entry.ForceRearchive = entry.ForceRearchive && entry.RearchiveStartedAt == ""
-		entry.RearchiveStartedAt = ""
-	}
-	var updated map[string]Entry
+	updated := maps.Clone(l.data)
 	for raw := range l.data {
 		if candidate, _ := splitFragment(raw); candidate == base {
 			aliases = append(aliases, raw)
@@ -323,71 +279,52 @@ func (l *Ledger) put(base string, aliases []string, entry Entry) error {
 	}
 	for _, raw := range aliases {
 		value := entry
-		if _, fragment := splitFragment(raw); fragment != "" && value.ArchiveURL != "" {
-			value.ArchiveURL += "#" + fragment
+		// Preserve each original Wayback URL independently of the local backup.
+		if previous := l.data[raw]; previous.ArchiveURL != "" {
+			value.ArchiveURL = previous.ArchiveURL
 		}
-		if previous, ok := l.data[raw]; !ok || previous != value {
-			if updated == nil {
-				updated = maps.Clone(l.data)
-			}
-			updated[raw] = value
-		}
+		updated[raw] = value
 	}
-	if updated == nil {
-		return nil
+	if maps.Equal(l.data, updated) {
+		return l.writeExcluded()
 	}
-	return l.write(updated, l.cooldown)
+	return l.write(updated)
 }
 
 // write commits a replacement while the caller holds l.mu.
-func (l *Ledger) write(updated map[string]Entry, cooldown time.Time) error {
-	var retryAt string
-	if !cooldown.IsZero() {
-		retryAt = cooldown.UTC().Format(time.RFC3339Nano)
-	}
-	if err := writeJSON(l.path, database{Version: databaseVersion, RetryAt: retryAt, Entries: updated}); err != nil {
+func (l *Ledger) write(updated map[string]Entry) error {
+	if err := writeJSON(l.path, database{Version: databaseVersion, Entries: updated}); err != nil {
 		return err
 	}
-	l.data, l.cooldown = updated, cooldown
-	return nil
+	l.data = updated
+	return l.writeExcluded()
 }
 
-func writeJSON(path string, value any) error {
-	var content bytes.Buffer
-	encoder := json.NewEncoder(&content)
-	encoder.SetIndent("", "  ")
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(value); err != nil {
-		return err
-	}
-	if previous, err := os.ReadFile(path); err == nil && bytes.Equal(previous, content.Bytes()) {
-		return nil
-	}
-	file, err := os.CreateTemp(filepath.Dir(path), ".archive-links-*.tmp")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(file.Name())
-	defer file.Close()
-	if _, err = file.Write(content.Bytes()); err != nil {
-		return err
-	}
-	if err = file.Sync(); err != nil {
-		return err
-	}
-	if err = file.Close(); err != nil {
-		return err
-	}
-	if err = os.Rename(file.Name(), path); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (l *Ledger) retryAt() time.Time {
+func (l *Ledger) setExcluded(links []string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.cooldown
+	l.excluded = append([]string{}, links...)
+	return l.writeExcluded()
+}
+
+// writeExcluded is called with l.mu held after the primary database is saved.
+func (l *Ledger) writeExcluded() error {
+	if l.excluded == nil {
+		return nil
+	}
+	links := make(map[string]bool)
+	for _, raw := range l.excluded {
+		links[raw] = true
+	}
+	for raw, entry := range l.data {
+		if entry.Status == "blocked" {
+			links[raw] = true
+		}
+	}
+	if err := writeJSON(filepath.Join(filepath.Dir(l.path), "dbx.json"), sortedKeys(links)); err != nil {
+		return fmt.Errorf("write excluded links: %w", err)
+	}
+	return nil
 }
 
 func (l *Ledger) removeExcluded() error {
@@ -402,363 +339,242 @@ func (l *Ledger) removeExcluded() error {
 	if len(updated) == len(l.data) {
 		return nil
 	}
-	return l.write(updated, l.cooldown)
+	return l.write(updated)
 }
 
-func (l *Ledger) setCooldown(until time.Time) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if !until.After(l.cooldown) {
+func writeJSON(path string, value any) error {
+	var content bytes.Buffer
+	encoder := json.NewEncoder(&content)
+	encoder.SetIndent("", "  ")
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return err
+	}
+	if previous, err := os.ReadFile(path); err == nil && bytes.Equal(previous, content.Bytes()) {
 		return nil
 	}
-	return l.write(l.data, until)
-}
-
-func (l *Ledger) clearExpiredCooldown(now time.Time) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.cooldown.IsZero() || l.cooldown.After(now) {
-		return nil
+	file, err := os.OpenFile(path+".tmp", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
 	}
-	return l.write(l.data, time.Time{})
-}
-
-type capture struct {
-	Status        string `json:"status"`
-	JobID         string `json:"job_id"`
-	OriginalJobID string `json:"original_job_id"`
-	OriginalURL   string `json:"original_url"`
-	Timestamp     string `json:"timestamp"`
-	StatusExt     string `json:"status_ext"`
-	Message       string `json:"message"`
-}
-
-func (c capture) failure(entry Entry) Entry {
-	entry.Error, entry.ErrorMsg = c.StatusExt, c.Message
-	if entry.Error == "" && entry.ErrorMsg == "" {
-		entry.ErrorMsg = "unexpected Wayback response."
+	defer os.Remove(file.Name())
+	defer file.Close()
+	if _, err = file.Write(content.Bytes()); err != nil {
+		return err
 	}
-	return entry
-}
-
-func backpressure(c capture) bool {
-	switch c.StatusExt {
-	case "error:user-session-limit", "error:blocked-client-ip", "error:no-browsers-available", "error:internal-server-error", "error:celery":
-		return true
+	if err = file.Sync(); err != nil {
+		return err
 	}
-	message := strings.ToLower(c.Message)
-	return strings.Contains(c.StatusExt, "daily-bandwidth") || strings.Contains(message, "limit of active sessions") || strings.Contains(message, "rate limit")
+	if err = file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), path)
 }
 
-type serviceUnavailable struct {
+type captureError struct {
+	code    string
 	message string
 	retryAt time.Time
 }
 
-func (e *serviceUnavailable) Error() string { return e.message }
+func (e *captureError) Error() string { return e.message }
 
-func parseRetryAfter(value string, now time.Time) time.Time {
-	value = strings.TrimSpace(value)
-	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds >= 0 && seconds <= int64((1<<63-1)/time.Second) {
-		return now.Add(time.Duration(seconds) * time.Second)
-	}
-	if date, err := http.ParseTime(value); err == nil {
-		return date
-	}
-	return now.Add(time.Minute)
+type pageSaver interface {
+	prepare(context.Context) error
+	save(context.Context, string, string) error
 }
 
-type authenticationError struct{ message string }
-
-func (e *authenticationError) Error() string { return e.message }
-
-func fatalServiceError(err error) bool {
-	var unavailable *serviceUnavailable
-	return errors.As(err, &unavailable) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+type singleFile struct {
+	binary string
+	chrome string
+	cache  string
+	output io.Writer
 }
 
-type archiveService interface {
-	authenticated() bool
-	available(context.Context, string) (string, error)
-	verifyReplay(context.Context, string) error
-	save(context.Context, string, bool) (capture, error)
-	status(context.Context, string) (capture, error)
-}
-
-type paceGate struct {
-	mu   sync.Mutex
-	next time.Time
-}
-
-func wait(ctx context.Context, duration time.Duration) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if duration <= 0 {
-		return nil
-	}
-	timer := time.NewTimer(duration)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-func (g *paceGate) wait(ctx context.Context, interval time.Duration) error {
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		g.mu.Lock()
-		delay := time.Until(g.next)
-		if delay <= 0 {
-			g.next = time.Now().Add(interval)
-			g.mu.Unlock()
-			return ctx.Err()
-		}
-		g.mu.Unlock()
-		if err := wait(ctx, delay); err != nil {
-			return err
+func (s *singleFile) prepare(ctx context.Context) error {
+	if s.chrome == "" {
+		home, _ := os.UserHomeDir()
+		for _, name := range []string{
+			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+			filepath.Join(home, "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+			"google-chrome", "chromium", "chromium-browser",
+		} {
+			if path, err := exec.LookPath(name); err == nil {
+				s.chrome = path
+				break
+			}
 		}
 	}
-}
-
-func (g *paceGate) postpone(until time.Time) time.Time {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if until.After(g.next) {
-		g.next = until
+	if path, err := exec.LookPath(s.chrome); err == nil {
+		s.chrome = path
+	} else {
+		return errors.New("chrome was not found; set --chrome to its executable path")
 	}
-	return g.next
-}
-
-type Client struct {
-	httpClient      *http.Client
-	availabilityURL string
-	saveURL         string
-	authorization   string
-	authRejected    atomic.Bool
-	requestInterval time.Duration
-	saveInterval    time.Duration
-	requestGate     paceGate
-	saveGate        paceGate
-	onRateLimit     func(time.Time) error
-}
-
-func (c *Client) authenticated() bool {
-	return c.authorization != "" && !c.authRejected.Load()
-}
-
-func (c *Client) pace(ctx context.Context, save bool) error {
-	if !save {
-		return c.requestGate.wait(ctx, c.requestInterval)
+	if s.binary == "" {
+		s.binary, _ = exec.LookPath("single-file")
 	}
-	// Keep save starts spaced even when status requests occupy the request gate.
-	c.saveGate.mu.Lock()
-	defer c.saveGate.mu.Unlock()
-	if err := wait(ctx, time.Until(c.saveGate.next)); err != nil {
-		return err
-	}
-	if err := c.requestGate.wait(ctx, c.requestInterval); err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	c.saveGate.next = time.Now().Add(c.saveInterval)
-	return nil
-}
-
-func newClient(credentials string) (*Client, error) {
-	access, secret := os.Getenv("ARCHIVE_ORG_ACCESS_KEY"), os.Getenv("ARCHIVE_ORG_SECRET_KEY")
-	if access == "" && secret == "" {
-		access, secret = os.Getenv("IA_ACCESS_KEY"), os.Getenv("IA_SECRET_KEY")
-	}
-	if credentials != "" {
-		content, err := os.ReadFile(credentials)
+	if s.binary != "" {
+		path, err := exec.LookPath(s.binary)
 		if err != nil {
-			return nil, err
+			return fmt.Errorf("find singlefile executable: %w", err)
 		}
-		var keys struct {
-			Access string `json:"access_key"`
-			Secret string `json:"secret_key"`
-		}
-		if err := json.Unmarshal(content, &keys); err != nil || keys.Access == "" || keys.Secret == "" {
-			return nil, errors.New("credentials file needs nonempty access_key and secret_key strings")
-		}
-		access, secret = keys.Access, keys.Secret
+		s.binary = path
+		return nil
 	}
-	c := &Client{
-		httpClient:      &http.Client{Timeout: 45 * time.Second},
-		availabilityURL: "https://archive.org/wayback/available",
-		saveURL:         "https://web.archive.org/save",
-		requestInterval: time.Second,
-		saveInterval:    21 * time.Second,
-	}
-	if access != "" && secret != "" {
-		c.authorization = "LOW " + access + ":" + secret
-		c.saveInterval = 9 * time.Second
-	}
-	return c, nil
+	return s.install(ctx)
 }
 
-func (c *Client) request(ctx context.Context, method, endpoint string, data url.Values, output any) error {
-	attempts := 3
-	if data != nil {
-		attempts = 1 // A timed-out POST may already have started a capture.
-		if !c.authenticated() {
-			return &authenticationError{"set valid ARCHIVE_ORG_ACCESS_KEY and ARCHIVE_ORG_SECRET_KEY to save pages."}
-		}
+func (s *singleFile) install(ctx context.Context) error {
+	// Pin and verify the standalone executable; no Node, Deno or browser download.
+	releases := map[string]struct{ name, sha256 string }{
+		"darwin/arm64": {"single-file-aarch64-apple-darwin", "bca0eccc5551f4358bc8c7e584bbdb13d073c6d335412d3a6bdb244a94c7027b"},
+		"darwin/amd64": {"single-file-x86_64-apple-darwin", "19f4b794554ab36ba5bbc91747f33e000a79e309c3ad9b245dcd3d186395f041"},
+		"linux/arm64":  {"single-file-aarch64-linux", "ce5f493ee42102b41134fa76f8c3bcf0c2f6214f99654b754d7427a5e4da4fb9"},
+		"linux/amd64":  {"single-file-x86_64-linux", "3e956a47097af7c3da2ffc063a064462651c4486241488250e3296ed6e381ab2"},
 	}
-	var last error
-	for attempt := 0; attempt < attempts; {
-		retry, err := c.requestOnce(ctx, method, endpoint, data, output)
-		var limited *serviceUnavailable
-		if errors.As(err, &limited) && !limited.retryAt.IsZero() {
-			until := c.requestGate.postpone(limited.retryAt)
-			if c.onRateLimit != nil {
-				if err := c.onRateLimit(until); err != nil {
-					return err
-				}
-			}
-			// HTTP 429 rejected the request, so retrying it after the shared
-			// cooldown is safe, including POSTs. Ambiguous failures still stop.
-			continue
-		}
-		if err == nil || !retry {
-			return err
-		}
-		last = err
-		attempt++
-		if attempt < attempts {
-			if err := wait(ctx, time.Duration(1<<attempt)*time.Second); err != nil {
-				return err
-			}
-		}
+	release, ok := releases[runtime.GOOS+"/"+runtime.GOARCH]
+	if !ok {
+		return errors.New("no bundled singlefile release for this platform; set --single-file")
 	}
-	if data != nil {
-		return last
+	name := filepath.Join(s.cache, "single-file-"+singleFileVersion+"-"+runtime.GOOS+"-"+runtime.GOARCH)
+	if _, err := exec.LookPath(name); err == nil {
+		s.binary = name
+		return nil
 	}
-	return &serviceUnavailable{message: last.Error()}
-}
-
-// requestOnce reports whether a failed GET or HEAD can safely be retried. Only an
-// explicit HTTP 429 permits a POST retry; ambiguous failures are never retried.
-func (c *Client) requestOnce(ctx context.Context, method, endpoint string, data url.Values, output any) (bool, error) {
-	if err := c.pace(ctx, data != nil); err != nil {
-		return false, err
+	if err := os.MkdirAll(s.cache, 0755); err != nil {
+		return err
 	}
-	var body io.Reader
-	if data != nil {
-		body = strings.NewReader(data.Encode())
+	if s.output != nil {
+		fmt.Fprintf(s.output, "installing singlefile %s\n", singleFileVersion)
 	}
-	request, err := http.NewRequestWithContext(ctx, method, endpoint, body)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		"https://github.com/gildas-lormeau/single-file-cli/releases/download/v"+singleFileVersion+"/"+release.name, nil)
 	if err != nil {
-		return false, err
+		return err
 	}
-	request.Header.Set("User-Agent", "blog-archive-links/1.0")
-	if method != http.MethodHead {
-		request.Header.Set("Accept", "application/json")
-	}
-	if data != nil {
-		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		// Another worker can discover rejected credentials while this one waits.
-		if !c.authenticated() {
-			return false, &authenticationError{"internet archive credentials need to be updated."}
-		}
-	}
-	if c.authorization != "" && method != http.MethodHead {
-		request.Header.Set("Authorization", c.authorization)
-	}
-	response, err := c.httpClient.Do(request)
+	response, err := (&http.Client{Timeout: 5 * time.Minute}).Do(request)
 	if err != nil {
-		if ctx.Err() != nil {
-			return false, ctx.Err()
-		}
-		return true, fmt.Errorf("wayback connection failed: %w", err)
+		return fmt.Errorf("download singlefile: %w", err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode == http.StatusTooManyRequests {
-		retryAt := parseRetryAfter(response.Header.Get("Retry-After"), time.Now())
-		return false, &serviceUnavailable{
-			message: "wayback rate limit; retry after " + retryAt.Local().Format("2006-01-02 15:04:05 MST") + ".",
-			retryAt: retryAt,
-		}
-	}
-	if (data != nil || strings.HasPrefix(endpoint, c.saveURL+"/status/")) && (response.StatusCode == 401 || response.StatusCode == 403) {
-		c.authRejected.Store(true)
-		return false, &authenticationError{fmt.Sprintf("wayback API returned HTTP %d; check Internet Archive credentials.", response.StatusCode)}
-	}
 	if response.StatusCode != http.StatusOK {
-		if method == http.MethodHead && response.StatusCode == http.StatusNotFound {
-			return false, errReplayNotFound
-		}
-		err := fmt.Errorf("wayback returned HTTP %d", response.StatusCode)
-		serverError := response.StatusCode >= 500 && response.StatusCode < 600
-		if serverError && data != nil {
-			return false, &serviceUnavailable{message: err.Error() + "; captures paused. Rerun later to recover the submission."}
-		}
-		return serverError, err
+		return fmt.Errorf("download singlefile: HTTP %d", response.StatusCode)
 	}
-	if method == http.MethodHead {
-		if !archivePattern.MatchString(response.Request.URL.String()) {
-			return false, errors.New("wayback replay redirected outside an archived page")
-		}
-		return false, nil
-	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 8<<20)).Decode(output); err != nil {
-		return true, fmt.Errorf("decode Wayback response: %w", err)
-	}
-	return false, nil
-}
-
-func (c *Client) available(ctx context.Context, raw string) (string, error) {
-	var result struct {
-		Snapshots struct {
-			Closest struct {
-				Available bool            `json:"available"`
-				URL       string          `json:"url"`
-				Status    json.RawMessage `json:"status"`
-			} `json:"closest"`
-		} `json:"archived_snapshots"`
-	}
-	err := c.request(ctx, http.MethodGet, c.availabilityURL+"?"+url.Values{"url": {raw}}.Encode(), nil, &result)
+	file, err := os.CreateTemp(s.cache, ".download-*")
 	if err != nil {
-		return "", err
+		return err
 	}
-	capture := result.Snapshots.Closest
-	if capture.Available && strings.Trim(string(capture.Status), `"`) == "200" && archivePattern.MatchString(capture.URL) {
-		return "https://" + strings.SplitN(capture.URL, "://", 2)[1], nil
+	defer os.Remove(file.Name())
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(file, hash), response.Body); err != nil {
+		return err
 	}
-	return "", nil
-}
-
-func (c *Client) verifyReplay(ctx context.Context, archive string) error {
-	// Wayback's index can report a successful capture that cannot be replayed.
-	if err := c.request(ctx, http.MethodHead, archive, nil, nil); err != nil {
-		return fmt.Errorf("verify archive replay %s: %w", archive, err)
+	if fmt.Sprintf("%x", hash.Sum(nil)) != release.sha256 {
+		return errors.New("singlefile download checksum mismatch")
 	}
+	if err := file.Chmod(0755); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(file.Name(), name); err != nil {
+		return err
+	}
+	s.binary = name
 	return nil
 }
 
-func (c *Client) save(ctx context.Context, raw string, force bool) (capture, error) {
-	var result capture
-	// Outlink capture is opt-in; leave it disabled for these per-page requests.
-	within := "3600"
-	if force {
-		within = "0"
+func (s *singleFile) save(ctx context.Context, raw, destination string) error {
+	partial := destination + ".part.html"
+	defer os.Remove(partial)
+	command := exec.CommandContext(ctx, s.binary, raw, partial,
+		"--browser-executable-path="+s.chrome,
+		"--crawl-links=false", "--compress-content=false", "--block-scripts=true",
+		"--browser-wait-until-fallback=false", "--filename-conflict-action=overwrite", "--dump-json=true")
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.Cancel = func() error {
+		err := syscall.Kill(-command.Process.Pid, syscall.SIGTERM)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
 	}
-	err := c.request(ctx, http.MethodPost, c.saveURL, url.Values{"url": {raw}, "skip_first_archive": {"1"}, "if_not_archived_within": {within}}, &result)
-	return result, err
+	command.WaitDelay = 5 * time.Second
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	err := command.Run()
+	if command.Process != nil {
+		// Also clean up Chrome descendants after cancellation or a CLI crash.
+		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err != nil {
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = err.Error()
+		}
+		return &captureError{code: "error:capture", message: message}
+	}
+	var result struct {
+		Response struct {
+			Status     int    `json:"status"`
+			StatusText string `json:"statusText"`
+			Headers    []struct {
+				Name  string `json:"name"`
+				Value string `json:"value"`
+			} `json:"headers"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		return &captureError{code: "error:capture", message: "invalid singlefile response: " + err.Error()}
+	}
+	status := result.Response.Status
+	if status < 200 || status >= 300 {
+		failure := &captureError{code: fmt.Sprintf("error:http-%d", status),
+			message: fmt.Sprintf("HTTP status=%d %s", status, result.Response.StatusText)}
+		if status == http.StatusTooManyRequests {
+			for _, header := range result.Response.Headers {
+				if strings.EqualFold(header.Name, "Retry-After") {
+					failure.retryAt = parseRetryAfter(header.Value, time.Now())
+				}
+			}
+		}
+		return failure
+	}
+	file, err := os.OpenFile(partial, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("open captured page: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() == 0 {
+		return &captureError{code: "error:capture", message: "singlefile produced an empty page"}
+	}
+	if err := file.Chmod(0644); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(partial, destination)
 }
 
-func (c *Client) status(ctx context.Context, job string) (capture, error) {
-	var result capture
-	err := c.request(ctx, http.MethodGet, c.saveURL+"/status/"+url.PathEscape(job), nil, &result)
-	return result, err
+func parseRetryAfter(value string, now time.Time) time.Time {
+	if seconds, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil && seconds >= 0 && seconds <= int64((1<<63-1)/time.Second) {
+		return now.Add(time.Duration(seconds) * time.Second)
+	}
+	date, _ := http.ParseTime(value)
+	return date
 }
 
 type work struct {
@@ -769,33 +585,13 @@ type work struct {
 
 type runner struct {
 	ledger        *Ledger
-	client        archiveService
+	saver         pageSaver
+	root          string
+	backups       string
 	concurrency   int
-	pollInterval  time.Duration
 	retryInterval time.Duration
 	output        io.Writer
 	outputMu      sync.Mutex
-	now           func() time.Time
-}
-
-func (r *runner) currentTime() time.Time {
-	if r.now != nil {
-		return r.now().UTC()
-	}
-	return time.Now().UTC()
-}
-
-func acceptsArchive(entry Entry, archive string) bool {
-	if !entry.ForceRearchive {
-		return true
-	}
-	started, err := time.Parse(time.RFC3339Nano, entry.RearchiveStartedAt)
-	match := archivePattern.FindStringSubmatch(archive)
-	if err != nil || len(match) != 2 {
-		return false
-	}
-	captured, err := time.Parse("20060102150405", match[1])
-	return err == nil && !captured.Before(started.Truncate(time.Second))
 }
 
 func (r *runner) printf(format string, args ...any) {
@@ -806,8 +602,45 @@ func (r *runner) printf(format string, args ...any) {
 	}
 }
 
-func (r *runner) printRateLimit(until time.Time) {
-	r.printf("wayback rate limit; waiting until %s.\n", until.Local().Format("2006-01-02 15:04:05 MST"))
+func errorLine(base string, entry Entry) string {
+	if entry.errorText() == "" {
+		return ""
+	}
+	prefix := fmt.Sprintf("%s: %s: ", base, entry.Status)
+	message := strings.ReplaceAll(entry.errorText(), "\r\n", "\n")
+	return prefix + strings.ReplaceAll(message, "\n", "\n"+prefix) + "\n"
+}
+
+func (r *runner) printRetry(base string, entry Entry, until time.Time) {
+	r.printf("%s%s: retry at %s\n", errorLine(base, entry), base, until.Local().Format("2006-01-02 15:04:05 MST"))
+}
+
+func (r *runner) complete(item work, entry Entry, name string) error {
+	info, err := os.Stat(filepath.Join(r.root, name))
+	if err != nil {
+		return err
+	}
+	if entry.File != name || entry.SavedAt == "" {
+		entry.SavedAt = info.ModTime().UTC().Format(time.RFC3339Nano)
+	}
+	entry.Status, entry.File = "saved", name
+	entry.PendingFile, entry.Error, entry.ErrorMsg, entry.RetryAt = "", "", "", ""
+	entry.ForceRearchive = false
+	return r.ledger.put(item.base, item.aliases, entry)
+}
+
+func (r *runner) exists(name string) (bool, error) {
+	if name == "" {
+		return false, nil
+	}
+	info, err := os.Stat(filepath.Join(r.root, name))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return info.Mode().IsRegular() && info.Size() > 0, nil
 }
 
 type retryLater struct {
@@ -817,57 +650,78 @@ type retryLater struct {
 
 func (e *retryLater) Error() string { return e.entry.errorText() }
 
-func errorLine(base string, entry Entry) string {
-	status, message := entry.Status, entry.errorText()
-	if message == "" {
-		return ""
-	}
-	if status == "replay_pending" {
-		status = "replay unavailable"
-		message = strings.TrimPrefix(message, "verify archive replay "+entry.ArchiveURL+": ")
-	}
-	return fmt.Sprintf("%s: %s: %s\n", base, status, message)
-}
-
-func (r *runner) printError(base string, entry Entry) {
-	if line := errorLine(base, entry); line != "" {
-		r.printf("%s", line)
-	}
-}
-
-func (r *runner) printRetry(base string, entry Entry, until time.Time) {
-	prefix := "retry at"
-	if entry.Status == "replay_pending" {
-		prefix = "waiting for replay; retry at"
-	}
-	r.printf("%s%s: %s %s\n", errorLine(base, entry), base, prefix, until.Local().Format("2006-01-02 15:04:05 MST"))
-}
-
 func (r *runner) attempt(ctx context.Context, item work) error {
-	newForce := item.entry.ForceRearchive && item.entry.RearchiveStartedAt == ""
-	if r.retryInterval > 0 && !newForce && item.entry.Status != "needs_auth" && item.entry.Status != "blocked" {
-		if until, err := time.Parse(time.RFC3339Nano, item.entry.RetryAt); err == nil && until.After(r.currentTime()) {
-			r.printRetry(item.base, item.entry, until)
-			return &retryLater{entry: item.entry, delay: until.Sub(r.currentTime())}
-		}
+	entry := item.entry
+	if until, err := time.Parse(time.RFC3339Nano, entry.RetryAt); err == nil && until.After(time.Now()) &&
+		(!entry.ForceRearchive || entry.PendingFile != "") {
+		r.printRetry(item.base, entry, until)
+		return &retryLater{entry, time.Until(until)}
 	}
-	item.entry.RetryAt = ""
-	err := r.process(ctx, item)
-	entry, found := r.ledger.record(item.base)
-	if r.retryInterval <= 0 || ctx.Err() != nil || !found || (entry.Error == "" && entry.ErrorMsg == "") || entry.Status == "blocked" || entry.Status == "needs_auth" {
-		if ctx.Err() == nil && found {
-			r.printError(item.base, entry)
-		}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	until := r.currentTime().Add(r.retryInterval)
-	entry.RetryAt = until.Format(time.RFC3339Nano)
-	if saveErr := r.store(item, entry); saveErr != nil {
-		r.printError(item.base, entry)
-		return errors.Join(err, saveErr)
+	if entry.PendingFile == "" {
+		sum := sha256.Sum256([]byte(item.base))
+		parsed, _ := url.Parse(item.base)
+		host := strings.ReplaceAll(parsed.Hostname(), ":", "-")
+		if len(host) > 80 {
+			host = host[:80]
+		}
+		name := fmt.Sprintf("%s-%x-%s.html", host, sum[:8], time.Now().UTC().Format("20060102T150405.000000000Z"))
+		entry.PendingFile = filepath.ToSlash(filepath.Join(r.backups, name))
 	}
-	r.printRetry(item.base, entry, until)
-	return &retryLater{entry: entry, delay: r.retryInterval}
+	entry.Status, entry.Error, entry.ErrorMsg, entry.RetryAt = "saving", "", "", ""
+	if err := r.ledger.put(item.base, item.aliases, entry); err != nil {
+		return err
+	}
+	r.printf("%s: saving\n", item.base)
+	err := r.saver.save(ctx, item.base, filepath.Join(r.root, entry.PendingFile))
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err == nil {
+		if err := r.complete(item, entry, entry.PendingFile); err != nil {
+			return err
+		}
+		r.printf("%s: saved\n", item.base)
+		return nil
+	}
+	entry.Status, entry.Error, entry.ErrorMsg = "failed", "error:capture", err.Error()
+	var failure *captureError
+	if errors.As(err, &failure) {
+		entry.Error = failure.code
+	}
+	entry = normalizeFailure(item.base, entry)
+	if entry.permanentFailure() {
+		entry.Status, entry.PendingFile, entry.ForceRearchive = "blocked", "", false
+	} else if r.retryInterval > 0 {
+		until := time.Now().Add(r.retryInterval)
+		if failure != nil && failure.retryAt.After(until) {
+			until = failure.retryAt
+		}
+		entry.RetryAt = until.UTC().Format(time.RFC3339Nano)
+	}
+	if err := r.ledger.put(item.base, item.aliases, entry); err != nil {
+		return err
+	}
+	if entry.RetryAt != "" {
+		until, _ := time.Parse(time.RFC3339Nano, entry.RetryAt)
+		r.printRetry(item.base, entry, until)
+		return &retryLater{entry, time.Until(until)}
+	}
+	r.printf("%s", errorLine(item.base, entry))
+	return nil
+}
+
+func wait(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(max(delay, 0))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return ctx.Err()
+	}
 }
 
 func parallel(ctx context.Context, items []work, count int, fn func(context.Context, work) error) error {
@@ -902,9 +756,6 @@ launch:
 				<-slots
 				var retry *retryLater
 				if !errors.As(err, &retry) {
-					if err == nil {
-						err = ctx.Err()
-					}
 					report(item, err)
 					return
 				}
@@ -925,216 +776,13 @@ launch:
 	workers.Wait()
 	close(failures)
 	var collected []error
-	var longest *serviceUnavailable
-	longestIndex := 0
 	for err := range failures {
 		collected = append(collected, err)
-		var unavailable *serviceUnavailable
-		if errors.As(err, &unavailable) && !unavailable.retryAt.IsZero() && (longest == nil || unavailable.retryAt.After(longest.retryAt)) {
-			longest = unavailable
-			longestIndex = len(collected) - 1
-		}
-	}
-	if longest != nil {
-		// The runner persists the first rate limit it finds in the joined error.
-		collected[0], collected[longestIndex] = collected[longestIndex], collected[0]
 	}
 	return errors.Join(collected...)
 }
 
-func (r *runner) recover(ctx context.Context, item work, fallback Entry) error {
-	fallback = normalizeFailure(item.base, fallback)
-	if fallback.permanentFailure() {
-		return r.store(item, fallback)
-	}
-	archive, err := r.client.available(ctx, item.base)
-	if err != nil {
-		if ctx.Err() != nil {
-			return err
-		}
-		if fallback.ErrorMsg != "" {
-			fallback.ErrorMsg += "; "
-		}
-		fallback.ErrorMsg += "archive lookup failed: " + err.Error()
-		return r.store(item, fallback)
-	}
-	if archive != "" && acceptsArchive(fallback, archive) {
-		fallback.ArchiveURL = archive
-		return r.replay(ctx, item, fallback)
-	}
-	return r.ledger.put(item.base, item.aliases, fallback)
-}
-
-func (r *runner) replay(ctx context.Context, item work, entry Entry) error {
-	entry = transition(entry, "replay_pending")
-	if err := r.store(item, entry); err != nil {
-		return err
-	}
-	item.entry = entry
-	r.printf("%s: checking replay\n", item.base)
-	if err := r.client.verifyReplay(ctx, entry.ArchiveURL); err != nil {
-		return r.fail(item, "replay_pending", err)
-	}
-	entry.Status, entry.ForceRearchive, entry.RearchiveStartedAt = "archived", false, ""
-	if err := r.store(item, entry); err != nil {
-		return err
-	}
-	r.printf("%s: archived\n", item.base)
-	return nil
-}
-
-func (r *runner) finishJob(ctx context.Context, base string, aliases []string, entry Entry) error {
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		result, err := r.client.status(ctx, entry.JobID)
-		if err != nil {
-			return r.fail(work{base, aliases, entry}, "pending", err)
-		}
-		if result.OriginalJobID != "" && result.OriginalJobID != entry.JobID {
-			entry = transition(entry, "pending")
-			entry.JobID = result.OriginalJobID
-			if err := r.ledger.put(base, aliases, entry); err != nil {
-				return err
-			}
-			continue
-		}
-		if backpressure(result) {
-			return r.store(work{base, aliases, entry}, result.failure(entry))
-		}
-		switch result.Status {
-		case "success":
-			archive := "https://web.archive.org/web/" + result.Timestamp + "/" + result.OriginalURL
-			if archivePattern.MatchString(archive) && acceptsArchive(entry, archive) {
-				r.printf("%s: captured\n", base)
-				entry.ArchiveURL = archive
-				return r.replay(ctx, work{base, aliases, entry}, entry)
-			}
-			entry = transition(entry, "failed")
-			entry.ErrorMsg = "wayback returned an old or invalid snapshot."
-			return r.ledger.put(base, aliases, entry)
-		case "error":
-			fallback := result.failure(transition(entry, "failed"))
-			return r.recover(ctx, work{base, aliases, entry}, fallback)
-		case "pending":
-			if err := wait(ctx, r.pollInterval); err != nil {
-				return err
-			}
-			continue
-		}
-		entry = result.failure(entry)
-		entry.Status = "uncertain"
-		return r.ledger.put(base, aliases, entry)
-	}
-}
-
-func (r *runner) store(item work, entry Entry) error {
-	return r.ledger.put(item.base, item.aliases, entry)
-}
-
-func (r *runner) fail(item work, status string, err error) error {
-	if fatalServiceError(err) {
-		return err
-	}
-	var auth *authenticationError
-	if errors.As(err, &auth) {
-		status = "needs_auth"
-	}
-	entry := item.entry
-	entry.Status, entry.Error, entry.ErrorMsg = status, "", err.Error()
-	return r.store(item, entry)
-}
-
-func (r *runner) process(ctx context.Context, item work) (err error) {
-	defer func() {
-		if err != nil {
-			if ctx.Err() == nil {
-				entry, found := r.ledger.record(item.base)
-				if !found {
-					entry.Status = "failed"
-				}
-				entry.Error, entry.ErrorMsg = "", err.Error()
-				err = errors.Join(err, r.store(item, entry))
-			}
-			return
-		}
-	}()
-	entry := item.entry
-	if entry.ForceRearchive && entry.RearchiveStartedAt == "" {
-		entry = transition(entry, "ready")
-		item.entry = entry
-		r.printf("%s: forcing rearchive\n", item.base)
-	}
-	if entry.Status == "needs_auth" && !r.client.authenticated() {
-		return r.store(item, entry)
-	}
-	lookup := false
-	switch entry.Status {
-	case "replay_pending":
-		return r.replay(ctx, item, entry)
-	case "archived":
-		return r.store(item, entry)
-	case "needs_auth":
-		if entry.JobID != "" {
-			entry.Status, entry.Error, entry.ErrorMsg = "pending", "", ""
-		} else {
-			entry = transition(entry, "ready")
-		}
-	case "ready", "pending":
-	default:
-		lookup = true
-	}
-	item.entry = entry
-	if lookup {
-		r.printf("%s: checking\n", item.base)
-		archive, err := r.client.available(ctx, item.base)
-		if err != nil {
-			return r.fail(item, "failed", err)
-		}
-		if archive != "" && acceptsArchive(entry, archive) {
-			r.printf("%s: found: %s\n", item.base, archive)
-			entry.ArchiveURL = archive
-			return r.replay(ctx, item, entry)
-		}
-		entry = transition(entry, "ready")
-		item.entry = entry
-	}
-	if entry.Status != "pending" {
-		if !r.client.authenticated() {
-			return r.fail(item, "needs_auth", &authenticationError{"internet archive credentials are required to save this page."})
-		}
-		if entry.ForceRearchive && entry.RearchiveStartedAt == "" {
-			entry.RearchiveStartedAt = r.currentTime().Format(time.RFC3339Nano)
-		}
-		item.entry = transition(entry, "submitting")
-		if err := r.store(item, item.entry); err != nil {
-			return err
-		}
-		r.printf("%s: saving\n", item.base)
-		result, err := r.client.save(ctx, item.base, entry.ForceRearchive)
-		if err != nil {
-			return r.fail(item, "uncertain", err)
-		}
-		if backpressure(result) {
-			return r.store(item, result.failure(transition(item.entry, "failed")))
-		}
-		if result.JobID == "" {
-			entry = result.failure(transition(item.entry, "failed"))
-			return r.recover(ctx, item, entry)
-		}
-		entry = transition(item.entry, "pending")
-		entry.JobID = result.JobID
-	} else {
-		r.printf("%s: saving\n", item.base)
-	}
-	if err := r.store(item, entry); err != nil {
-		return err
-	}
-	return r.finishJob(ctx, item.base, item.aliases, entry)
-}
-
-func (r *runner) run(ctx context.Context, urls []string) (runError error) {
+func (r *runner) run(ctx context.Context, urls []string) error {
 	if err := r.ledger.removeExcluded(); err != nil {
 		return err
 	}
@@ -1145,84 +793,71 @@ func (r *runner) run(ctx context.Context, urls []string) (runError error) {
 			groups[base] = append(groups[base], raw)
 		}
 	}
-	urls = nil
 	var items []work
 	for _, base := range sortedKeys(groups) {
-		entry, _ := r.ledger.record(base)
+		item := work{base, groups[base], r.ledger.record(base)}
+		entry := item.entry
 		if entry.Status == "blocked" && !entry.ForceRearchive {
-			delete(groups, base)
 			continue
 		}
-		items = append(items, work{base, groups[base], entry})
-		urls = append(urls, groups[base]...)
-	}
-	defer func() {
-		var unavailable *serviceUnavailable
-		if errors.As(runError, &unavailable) && !unavailable.retryAt.IsZero() {
-			if err := r.ledger.setCooldown(unavailable.retryAt); err != nil {
-				runError = errors.Join(runError, fmt.Errorf("persist rate-limit cooldown: %w", err))
-			}
+		name := entry.PendingFile
+		if name == "" && !entry.ForceRearchive {
+			name = entry.File
 		}
-		runError = errors.Join(runError, r.ledger.clearExpiredCooldown(r.currentTime()))
-	}()
-	if client, ok := r.client.(*Client); ok {
-		previous := client.onRateLimit
-		client.onRateLimit = func(until time.Time) error {
-			if err := r.ledger.setCooldown(until); err != nil {
+		exists, err := r.exists(name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			if err := r.complete(item, entry, name); err != nil {
 				return err
 			}
-			r.printRateLimit(until)
-			if previous != nil {
-				return previous(until)
-			}
-			return nil
+			continue
 		}
-		defer func() { client.onRateLimit = previous }()
+		items = append(items, item)
 	}
-	if retryAt := r.ledger.retryAt(); retryAt.After(r.currentTime()) {
-		r.printRateLimit(retryAt)
-		if err := wait(ctx, retryAt.Sub(r.currentTime())); err != nil {
+	if len(items) > 0 {
+		if err := r.saver.prepare(ctx); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Join(r.root, r.backups), 0755); err != nil {
 			return err
 		}
 	}
-	if err := r.ledger.clearExpiredCooldown(r.currentTime()); err != nil {
-		return err
-	}
-	// Resume already-submitted jobs before starting new work.
-	sort.SliceStable(items, func(i, j int) bool {
-		return items[i].entry.JobID != "" && items[j].entry.JobID == ""
-	})
-	count := r.concurrency
-	if count <= 0 {
-		count = 3
-	}
-	runError = parallel(ctx, items, count, r.attempt)
+	runError := parallel(ctx, items, max(r.concurrency, 1), r.attempt)
 	if ctx.Err() != nil {
 		return runError
 	}
 	counts := make(map[string]int)
-	for _, raw := range urls {
-		base, _ := splitFragment(raw)
-		entry, _ := r.ledger.record(base)
-		counts[entry.Status]++
+	for base := range groups {
+		counts[r.ledger.record(base).Status]++
 	}
 	var summary []string
 	for _, status := range sortedKeys(counts) {
 		summary = append(summary, fmt.Sprintf("%d %s", counts[status], status))
 	}
-	r.printf("%d links, %d distinct pages: %s\n", len(urls), len(groups), strings.Join(summary, ", "))
-	if counts["archived"] != len(urls) {
-		if counts["needs_auth"] > 0 {
-			return errors.Join(runError, fmt.Errorf("%w; valid Internet Archive credentials are required", errIncomplete))
-		}
+	r.printf("%d distinct pages: %s\n", len(groups), strings.Join(summary, ", "))
+	if counts["saved"]+counts["blocked"] != len(groups) {
 		return errors.Join(runError, errIncomplete)
 	}
 	return runError
 }
 
+func backupDirectory(root, directory string) (string, error) {
+	absolute, err := filepath.Abs(directory)
+	if err != nil {
+		return "", err
+	}
+	relative, err := filepath.Rel(root, absolute)
+	if err != nil || relative == "." || !filepath.IsLocal(relative) {
+		return "", errors.New("backup directory must be inside the blog repository")
+	}
+	return filepath.ToSlash(relative), nil
+}
+
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintln(flag.CommandLine.Output(), "usage: xoutlinks [options]")
+		fmt.Fprintln(flag.CommandLine.Output(), "usage: xoutlinks <backup-directory> [options]")
 		flag.PrintDefaults()
 	}
 	defaultRoot := "."
@@ -1230,48 +865,64 @@ func main() {
 		defaultRoot = strings.TrimSpace(string(output))
 	}
 	root := flag.String("root", defaultRoot, "blog repository directory")
-	concurrency := flag.Int("concurrency", 3, "maximum simultaneous capture jobs")
-	retryInterval := flag.Duration("retry-interval", 4*time.Minute, "delay before retrying failed captures")
-	credentials := flag.String("credentials", "", "private JSON file containing access_key and secret_key")
-	flag.Parse()
-	if *concurrency < 1 {
-		fmt.Fprintln(os.Stderr, "--concurrency must be positive")
+	concurrency := flag.Int("concurrency", 3, "maximum simultaneous page saves")
+	retryInterval := flag.Duration("retry-interval", 4*time.Minute, "delay before retrying failed saves")
+	binary := flag.String("single-file", os.Getenv("SINGLE_FILE_BIN"), "SingleFile executable (default: PATH or a cached standalone release)")
+	chrome := flag.String("chrome", os.Getenv("CHROME_BIN"), "installed Chrome executable (default: autodetect)")
+	args := os.Args[1:]
+	var out string
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		out, args = args[0], args[1:]
+	}
+	flag.CommandLine.Parse(args)
+	if out == "" {
+		fmt.Fprintln(os.Stderr, "backup directory is required as the first argument")
+		flag.Usage()
 		os.Exit(1)
 	}
-	if *retryInterval <= 0 {
-		fmt.Fprintln(os.Stderr, "--retry-interval must be positive")
+	if flag.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "unexpected positional arguments")
+		os.Exit(1)
+	}
+	if *concurrency < 1 || *retryInterval <= 0 {
+		fmt.Fprintln(os.Stderr, "--concurrency and --retry-interval must be positive")
 		os.Exit(1)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	err := func() error {
-		unlock, err := lockRepo(*root)
+		absolute, err := filepath.Abs(*root)
+		if err != nil {
+			return err
+		}
+		directory, err := backupDirectory(absolute, out)
+		if err != nil {
+			return err
+		}
+		unlock, err := lockRepo(absolute)
 		if err != nil {
 			return err
 		}
 		defer unlock()
-		urls, err := collectLinks(*root)
+		urls, err := collectLinks(absolute, directory)
 		if err != nil {
 			return err
 		}
 		urls, excluded := filterLinks(urls)
-		if err := writeJSON(filepath.Join(*root, "xoutlinks", "dbx.json"), excluded); err != nil {
-			return fmt.Errorf("write excluded links: %w", err)
-		}
-		ledger, err := loadLedger(filepath.Join(*root, "xoutlinks", "db.json"))
+		ledger, err := loadLedger(filepath.Join(absolute, "xoutlinks", "db.json"))
 		if err != nil {
 			return err
 		}
-		client, err := newClient(*credentials)
-		if err != nil {
+		if err := ledger.setExcluded(excluded); err != nil {
 			return err
 		}
-		r := runner{ledger: ledger, client: client, concurrency: *concurrency, pollInterval: 10 * time.Second, retryInterval: *retryInterval, output: os.Stdout}
+		saver := &singleFile{binary: *binary, chrome: *chrome, cache: filepath.Join(absolute, "xoutlinks", ".cache"), output: os.Stdout}
+		r := runner{ledger: ledger, saver: saver, root: absolute, backups: directory, concurrency: *concurrency, retryInterval: *retryInterval, output: os.Stdout}
 		return r.run(ctx, urls)
 	}()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		if errors.Is(err, context.Canceled) {
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 			os.Exit(130)
 		}
 		os.Exit(1)

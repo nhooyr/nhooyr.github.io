@@ -1,202 +1,476 @@
 {
-  "version": 1,
+  "version": 2,
   "entries": {
     "http://m.me/aqsnow": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/m.me-6ac4b1d1091632be-20261119T115253.327570000Z.html",
+      "saved_at": "2026-11-19T11:52:58.992545121Z",
       "archive_url": "https://web.archive.org/web/20261118075732/https://www.messenger.com/login.php?next=https%3A%2F%2Fwww.messenger.com%2Ft%2F61588391187038%2F%3Fhandler%3Dm.me"
     },
     "https://allanamartin.peelschools.org": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/allanamartin.peelschools.org-301a876101aeb0a5-20261119T115253.327579000Z.html",
+      "saved_at": "2026-11-19T11:53:02.672885127Z",
       "archive_url": "https://web.archive.org/web/20230102183824/https://allanamartin.peelschools.org/"
     },
     "https://chatgpt.com/u/aqsnow": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/chatgpt.com-093eefe2b96de6b8-20261119T115253.327558000Z.html",
+      "saved_at": "2026-11-19T11:52:59.705659598Z",
       "archive_url": "https://web.archive.org/web/20261118075744/https://chatgpt.com/u/aqsnow"
     },
     "https://coder.com": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/coder.com-88140157759201ee-20261119T115259.516266000Z.html",
+      "saved_at": "2026-11-19T11:53:07.84568947Z",
       "archive_url": "https://web.archive.org/web/20261116040920/https://coder.com/"
     },
     "https://cplusplus.com/user/Anmol444/": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/cplusplus.com-9f7ac934d3d475a0-20261119T115300.037343000Z.html",
+      "saved_at": "2026-11-19T11:53:07.142126882Z",
       "archive_url": "https://web.archive.org/web/20250610172111/https://cplusplus.com/user/Anmol444/"
     },
     "https://d2lang.com": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/d2lang.com-0c1756be103c67e8-20261119T115303.118232000Z.html",
+      "saved_at": "2026-11-19T11:53:10.168617923Z",
       "archive_url": "https://web.archive.org/web/20261103003308/https://d2lang.com/"
     },
     "https://discord.gg/PShenhb3": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/discord.gg-49c7e7a50ffd0245-20261119T115307.522831000Z.html",
+      "saved_at": "2026-11-19T11:53:13.055422235Z",
       "archive_url": "https://web.archive.org/web/20261118075737/https://discord.com/invite/PShenhb3"
     },
+    "https://en.wikipedia.org/wiki/As_You_Like_It": {
+      "status": "saved",
+      "file": "xoutlinks/backups/en.wikipedia.org-8461e02eb248dbfb-20261119T122907.944087000Z.html",
+      "saved_at": "2026-11-19T12:29:15.278792489Z"
+    },
+    "https://en.wikipedia.org/wiki/Austin,_Texas": {
+      "status": "saved",
+      "file": "xoutlinks/backups/en.wikipedia.org-3e720ef688045910-20261119T122907.944095000Z.html",
+      "saved_at": "2026-11-19T12:29:16.443803261Z"
+    },
+    "https://en.wikipedia.org/wiki/Characters_in_As_You_Like_It#Silvius": {
+      "status": "saved",
+      "file": "xoutlinks/backups/en.wikipedia.org-c3ac72ac37dc105c-20261119T122907.944040000Z.html",
+      "saved_at": "2026-11-19T12:29:15.064878819Z"
+    },
+    "https://en.wikipedia.org/wiki/Characters_in_As_You_Like_It#The_Court_of_Duke_Frederick": {
+      "status": "saved",
+      "file": "xoutlinks/backups/en.wikipedia.org-c3ac72ac37dc105c-20261119T122907.944040000Z.html",
+      "saved_at": "2026-11-19T12:29:15.064878819Z"
+    },
+    "https://en.wikipedia.org/wiki/Functional_completeness": {
+      "status": "saved",
+      "file": "xoutlinks/backups/en.wikipedia.org-717f32002cc5bca6-20261119T122915.616298000Z.html",
+      "saved_at": "2026-11-19T12:29:22.684171668Z"
+    },
+    "https://en.wikipedia.org/wiki/Gordon_Graydon_Memorial_Secondary_School": {
+      "status": "saved",
+      "file": "xoutlinks/backups/en.wikipedia.org-4d84347f66494fbc-20261119T122915.621256000Z.html",
+      "saved_at": "2026-11-19T12:29:22.936140631Z"
+    },
+    "https://en.wikipedia.org/wiki/Jalandhar": {
+      "status": "saved",
+      "file": "xoutlinks/backups/en.wikipedia.org-8788f0775b3c7432-20261119T122916.914462000Z.html",
+      "saved_at": "2026-11-19T12:29:24.366770999Z"
+    },
+    "https://en.wikipedia.org/wiki/Kaslo": {
+      "status": "saved",
+      "file": "xoutlinks/backups/en.wikipedia.org-db9f4e29fc599f3d-20261119T122923.183821000Z.html",
+      "saved_at": "2026-11-19T12:29:29.910746786Z"
+    },
+    "https://en.wikipedia.org/wiki/Manhattan": {
+      "status": "saved",
+      "file": "xoutlinks/backups/en.wikipedia.org-cccc33705f3d20f4-20261119T122923.441315000Z.html",
+      "saved_at": "2026-11-19T12:29:31.281203754Z"
+    },
+    "https://en.wikipedia.org/wiki/Quantitative_analysis_(finance)": {
+      "status": "saved",
+      "file": "xoutlinks/backups/en.wikipedia.org-fbb34055271830c7-20261119T122924.728977000Z.html",
+      "saved_at": "2026-11-19T12:29:31.343214415Z"
+    },
+    "https://en.wikipedia.org/wiki/ROT13": {
+      "status": "saved",
+      "file": "xoutlinks/backups/en.wikipedia.org-d4624f9ca395e281-20261119T122930.454001000Z.html",
+      "saved_at": "2026-11-19T12:29:37.239129204Z"
+    },
+    "https://en.wikipedia.org/wiki/San_Francisco": {
+      "status": "saved",
+      "file": "xoutlinks/backups/en.wikipedia.org-90f8841534de9fc5-20261119T122931.750197000Z.html",
+      "saved_at": "2026-11-19T12:29:40.207055189Z"
+    },
+    "https://en.wikipedia.org/wiki/The_Code_Book": {
+      "status": "saved",
+      "file": "xoutlinks/backups/en.wikipedia.org-ecea4773374f219d-20261119T122931.763487000Z.html",
+      "saved_at": "2026-11-19T12:29:38.793501226Z"
+    },
+    "https://en.wikipedia.org/wiki/Toronto": {
+      "status": "saved",
+      "file": "xoutlinks/backups/en.wikipedia.org-abec01eb0e976ca7-20261119T122937.764089000Z.html",
+      "saved_at": "2026-11-19T12:29:45.623976257Z"
+    },
+    "https://en.wikipedia.org/wiki/University_of_British_Columbia": {
+      "status": "saved",
+      "file": "xoutlinks/backups/en.wikipedia.org-97bc54164d81ca32-20261119T122939.302179000Z.html",
+      "saved_at": "2026-11-19T12:29:46.512083859Z"
+    },
+    "https://en.wikipedia.org/wiki/Vancouver": {
+      "status": "saved",
+      "file": "xoutlinks/backups/en.wikipedia.org-56f5374dedc6191d-20261119T122940.599734000Z.html",
+      "saved_at": "2026-11-19T12:29:47.967457474Z"
+    },
     "https://github.com/nhooyr": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-ce8645d55977829e-20261119T115308.341939000Z.html",
+      "saved_at": "2026-11-19T11:53:17.39052867Z",
       "archive_url": "https://web.archive.org/web/20261118094704/https://github.com/nhooyr"
     },
     "https://github.com/nhooyr/dotfiles": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-a1ed645f0f00922d-20261119T115310.646023000Z.html",
+      "saved_at": "2026-11-19T11:53:19.971027703Z",
       "archive_url": "https://web.archive.org/web/20201130090758/https://github.com/nhooyr/dotfiles"
     },
     "https://github.com/nhooyr/flappybird": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-40f1829bc5421233-20261119T115313.544673000Z.html",
+      "saved_at": "2026-11-19T11:53:22.065432036Z",
       "archive_url": "https://web.archive.org/web/20261118090508/https://github.com/nhooyr/flappybird"
     },
+    "https://github.com/nhooyr/nhooyr.github.io": {
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-2e12316ce7af188f-20261119T122946.062202000Z.html",
+      "saved_at": "2026-11-19T12:29:53.983217891Z"
+    },
+    "https://github.com/nhooyr/nhooyr.github.io/blob/main/2020/02/index.html": {
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-b24298916e71d397-20261119T122946.824439000Z.html",
+      "saved_at": "2026-11-19T12:29:54.697345254Z"
+    },
+    "https://github.com/nhooyr/nhooyr.github.io/blob/main/2020/02/time-to-give-back.html": {
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-650d842e37884a7a-20261119T122948.402125000Z.html",
+      "saved_at": "2026-11-19T12:29:56.129147838Z"
+    },
+    "https://github.com/nhooyr/nhooyr.github.io/blob/main/2020/02/why-nhooyr.html": {
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-0e9c0c7e921923a6-20261119T122954.382564000Z.html",
+      "saved_at": "2026-11-19T12:30:02.132726508Z"
+    },
+    "https://github.com/nhooyr/nhooyr.github.io/blob/main/2020/index.html": {
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-4cedcd659c92513a-20261119T122955.160820000Z.html",
+      "saved_at": "2026-11-19T12:30:02.701716783Z"
+    },
+    "https://github.com/nhooyr/nhooyr.github.io/blob/main/2022/01/broken-roots.html": {
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-96d853578ccb1b07-20261119T122956.487199000Z.html",
+      "saved_at": "2026-11-19T12:30:04.283231777Z"
+    },
+    "https://github.com/nhooyr/nhooyr.github.io/blob/main/2022/01/index.html": {
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-68d54f6f91f59ca9-20261119T123002.425436000Z.html",
+      "saved_at": "2026-11-19T12:30:07.771759842Z"
+    },
+    "https://github.com/nhooyr/nhooyr.github.io/blob/main/2022/index.html": {
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-d0d0eeca04a1b273-20261119T123003.228591000Z.html",
+      "saved_at": "2026-11-19T12:30:08.568137918Z"
+    },
+    "https://github.com/nhooyr/nhooyr.github.io/blob/main/2026/11/index.html": {
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-23e13752b46321cb-20261119T123004.813156000Z.html",
+      "saved_at": "2026-11-19T12:30:10.110788445Z"
+    },
+    "https://github.com/nhooyr/nhooyr.github.io/blob/main/2026/11/rebirth.html": {
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-c99219f0015fcf77-20261119T123008.163029000Z.html",
+      "saved_at": "2026-11-19T12:30:15.98986958Z"
+    },
+    "https://github.com/nhooyr/nhooyr.github.io/blob/main/2026/index.html": {
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-f1c59bba7b642147-20261119T123008.980525000Z.html",
+      "saved_at": "2026-11-19T12:30:14.311947155Z"
+    },
+    "https://github.com/nhooyr/nhooyr.github.io/blob/main/404.html": {
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-24ccc5e569337f82-20261119T123010.541473000Z.html",
+      "saved_at": "2026-11-19T12:30:15.701530209Z"
+    },
+    "https://github.com/nhooyr/nhooyr.github.io/blob/main/index.html": {
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-5299b2ec27fd2cda-20261119T123014.736114000Z.html",
+      "saved_at": "2026-11-19T12:30:23.030757466Z"
+    },
+    "https://github.com/nhooyr/nhooyr.github.io/blob/main/more/index.html": {
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-6c02ca6090350666-20261119T123016.016950000Z.html",
+      "saved_at": "2026-11-19T12:30:23.729288184Z"
+    },
+    "https://github.com/nhooyr/nhooyr.github.io/blob/main/more/links.html": {
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-55e867d762b5a338-20261119T123016.488965000Z.html",
+      "saved_at": "2026-11-19T12:30:24.016197046Z"
+    },
+    "https://github.com/nhooyr/nhooyr.github.io/blob/main/more/work.html": {
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-1d2136def6a068a7-20261119T123023.562189000Z.html",
+      "saved_at": "2026-11-19T12:30:31.368099371Z"
+    },
     "https://github.com/search?q=involves%3Anhooyr&type=issues": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-7f39660e90ae0a92-20261119T115317.908259000Z.html",
+      "saved_at": "2026-11-19T11:53:25.596532634Z",
       "archive_url": "https://web.archive.org/web/20261118081125/https://github.com/search?q=involves%3Anhooyr&type=issues"
     },
     "https://greed.bot": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/greed.bot-050a29bd1b423ee0-20261119T115320.475750000Z.html",
+      "saved_at": "2026-11-19T11:53:27.283984062Z",
       "archive_url": "https://web.archive.org/web/20261109092041/https://greed.bot/"
     },
     "https://jvh.sd8.bc.ca": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/jvh.sd8.bc.ca-c8697d52bdbd9b54-20261119T115322.576885000Z.html",
+      "saved_at": "2026-11-19T11:53:30.725627264Z",
       "archive_url": "https://web.archive.org/web/20260813102648/https://jvh.sd8.bc.ca/"
     },
     "https://kaslocalvarychapel.ca": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/kaslocalvarychapel.ca-50b722b7966b2310-20261119T115325.908668000Z.html",
+      "saved_at": "2026-11-19T11:53:33.335487259Z",
       "archive_url": "https://web.archive.org/web/20250731162302/https://kaslocalvarychapel.ca/"
     },
     "https://leqra.com": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/leqra.com-11476163b8c791b5-20261119T115327.725743000Z.html",
+      "saved_at": "2026-11-19T11:53:32.798150888Z",
       "archive_url": "https://web.archive.org/web/20261118081330/https://leqra.com/"
     },
     "https://nelsonstar.com/2026/06/13/kaslo-shakespeare-festival-presents-as-you-like-it/": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/nelsonstar.com-68dc79ad09192a03-20261119T115331.129650000Z.html",
+      "saved_at": "2026-11-19T11:53:47.265382726Z",
       "archive_url": "https://web.archive.org/web/20261118083913/https://nelsonstar.com/2026/06/13/kaslo-shakespeare-festival-presents-as-you-like-it/"
     },
     "https://open.spotify.com/user/31edap5bnzjwn54cpmznjrn632pm?si=78ac2b895f8540b0": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/open.spotify.com-7f3c1fb4850a5b80-20261119T115333.193750000Z.html",
+      "saved_at": "2026-11-19T11:53:39.873251282Z",
       "archive_url": "https://web.archive.org/web/20261118081138/https://open.spotify.com/user/31edap5bnzjwn54cpmznjrn632pm?si=78ac2b895f8540b0"
     },
+    "https://patreon.com/aqsnow": {
+      "status": "saved",
+      "file": "xoutlinks/backups/patreon.com-5d961f0c4ab7fd42-20261119T115333.713805000Z.html",
+      "saved_at": "2026-11-19T11:53:39.378761117Z",
+      "archive_url": "https://web.archive.org/web/20261119112147/https://www.patreon.com/cw/aqsnow"
+    },
     "https://powdertoy.co.uk/User.html?Name=anmol444": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/powdertoy.co.uk-8fa4f95f7c9958bd-20261119T115339.800660000Z.html",
+      "saved_at": "2026-11-19T11:53:45.801946432Z",
       "archive_url": "https://web.archive.org/web/20260305175847/https://powdertoy.co.uk/User.html?Name=Anmol444"
     },
     "https://signal.me/#eu/tQ-Lhsf5sfPPr0CffIPU5zdjmVVDf8wS-dXoYh8r5T49LEOezrRL4oSoS7YLSHcF": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/signal.me-487527234edd9354-20261119T115340.332715000Z.html",
+      "saved_at": "2026-11-19T11:53:44.366317884Z",
       "archive_url": "https://web.archive.org/web/20261117122640/https://signal.me/#eu/tQ-Lhsf5sfPPr0CffIPU5zdjmVVDf8wS-dXoYh8r5T49LEOezrRL4oSoS7YLSHcF"
     },
+    "https://signal.me/#eu/x3z5XV7ovRsyWYahmPgQwDZ1bJxiBTgM86t-wu7adpLtny1xTClAMqJ5_BjyKBLC": {
+      "status": "saved",
+      "file": "xoutlinks/backups/signal.me-487527234edd9354-20261119T115340.332715000Z.html",
+      "saved_at": "2026-11-19T11:53:44.366317884Z",
+      "archive_url": "https://web.archive.org/web/20261117122640/https://signal.me/#eu/x3z5XV7ovRsyWYahmPgQwDZ1bJxiBTgM86t-wu7adpLtny1xTClAMqJ5_BjyKBLC"
+    },
     "https://snapchat.com/t/8xdJbv0a": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/snapchat.com-173f2db81f0d003f-20261119T115344.768246000Z.html",
+      "saved_at": "2026-11-19T11:53:52.981143556Z",
       "archive_url": "https://web.archive.org/web/20261118081158/https://www.snapchat.com/@aqsnow?invite_id=ky28EsBQ&locale=en_CA&share_id=z1MACT62Ss2BDf6gwcEfQw&sid=e8cb0d0061fa4437bc35c20aa2f9acef"
     },
     "https://stackexchange.com/users/5377228/nhooyr?tab=accounts": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/stackexchange.com-cd25012b4d79abfc-20261119T115346.091354000Z.html",
+      "saved_at": "2026-11-19T11:53:53.24201528Z",
       "archive_url": "https://web.archive.org/web/20261118081209/https://stackexchange.com/users/5377228/nhooyr?tab=accounts"
     },
     "https://t.me/aqsnow0": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/t.me-875e6c5db58c1b7f-20261119T115348.113867000Z.html",
+      "saved_at": "2026-11-19T11:53:56.14564194Z",
       "archive_url": "https://web.archive.org/web/20261118081415/https://t.me/aqsnow0"
     },
     "https://terrastruct.com": {
-      "status": "archived",
+      "status": "ready",
       "archive_url": "https://web.archive.org/web/20260720195335/https://terrastruct.com/"
     },
     "https://us05web.zoom.us/j/8652767772?pwd=asTk9R4dmB9JFzZmsxspdtOWtlW68b.1": {
-      "status": "blocked",
-      "error": "error:no-request",
-      "error_msg": "The target server blocks access to https://us05web.zoom.us/j/8652767772?pwd=asTk9R4dmB9JFzZmsxspdtOWtlW68b.1. (HTTP status=403)"
+      "status": "saved",
+      "file": "xoutlinks/backups/us05web.zoom.us-1d13974072a161ad-20261119T115353.302327000Z.html",
+      "saved_at": "2026-11-19T11:53:57.994115095Z"
+    },
+    "https://vimeo.com/aqsnow": {
+      "status": "saved",
+      "file": "xoutlinks/backups/vimeo.com-45cce4db843c74fb-20261119T115353.611187000Z.html",
+      "saved_at": "2026-11-19T11:54:01.425089902Z",
+      "archive_url": "https://web.archive.org/web/20261119112157/https://vimeo.com/aqsnow"
     },
     "https://wa.me/aqsnow0?s=p": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/wa.me-38fca4e9671c80e0-20261119T115356.641574000Z.html",
+      "saved_at": "2026-11-19T11:54:01.182847287Z",
       "archive_url": "https://web.archive.org/web/20261118081415/https://api.whatsapp.com/send/?text&username=aqsnow0&type=username&app_absent=0&s=p"
     },
+    "https://web.archive.org/web/20260720195335/https://terrastruct.com/": {
+      "status": "saved",
+      "file": "xoutlinks/backups/web.archive.org-c6e6d3ed50cbd855-20261119T123024.074960000Z.html",
+      "saved_at": "2026-11-19T12:30:56.037945523Z"
+    },
     "https://www.engphys.ubc.ca/": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/www.engphys.ubc.ca-3effdce619f58573-20261119T115358.507261000Z.html",
+      "saved_at": "2026-11-19T11:54:14.467468421Z",
       "archive_url": "https://web.archive.org/web/20260822171939/https://www.engphys.ubc.ca/"
     },
     "https://www.facebook.com/KasloSar/": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/www.facebook.com-17b3746614d00784-20261119T115401.584054000Z.html",
+      "saved_at": "2026-11-19T11:54:07.392540153Z",
       "archive_url": "https://web.archive.org/web/20261118095345/https://www.facebook.com/login/?next=https%3A%2F%2Fwww.facebook.com%2FKasloSar%2F"
     },
     "https://www.facebook.com/aqsnow": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/www.facebook.com-253c351c66ac600b-20261119T115401.915977000Z.html",
+      "saved_at": "2026-11-19T11:54:09.976008328Z",
       "archive_url": "https://web.archive.org/web/20261011133100/https://www.facebook.com/aqsnow"
     },
     "https://www.facebook.com/aqsnow/photos_albums": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/www.facebook.com-1d27be3366687551-20261119T115407.814674000Z.html",
+      "saved_at": "2026-11-19T11:54:14.833807841Z",
       "archive_url": "https://web.archive.org/web/20261118095345/https://www.facebook.com/aqsnow/photos_albums"
     },
     "https://www.facebook.com/kaslojazz/": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/www.facebook.com-d3c98c2d663064d9-20261119T115410.443631000Z.html",
+      "saved_at": "2026-11-19T11:54:16.035513405Z",
       "archive_url": "https://web.archive.org/web/20261118100344/https://www.facebook.com/login/?next=https%3A%2F%2Fwww.facebook.com%2Fkaslojazz%2F"
     },
     "https://www.facebook.com/p/Kaslo-Area-Fire-Department-100066550095766/": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/www.facebook.com-5a6d7b9ed88458e1-20261119T115414.781441000Z.html",
+      "saved_at": "2026-11-19T11:54:20.175327955Z",
       "archive_url": "https://web.archive.org/web/20261118101621/https://www.facebook.com/login/?next=https%3A%2F%2Fwww.facebook.com%2Fp%2FKaslo-Area-Fire-Department-100066550095766%2F"
     },
     "https://www.facebook.com/p/Kaslo-District-Public-Library-100068635964711/": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/www.facebook.com-620e6277945b2ea3-20261119T115415.323537000Z.html",
+      "saved_at": "2026-11-19T11:54:20.979241Z",
       "archive_url": "https://web.archive.org/web/20261118101626/https://www.facebook.com/login/?next=https%3A%2F%2Fwww.facebook.com%2Fp%2FKaslo-District-Public-Library-100068635964711%2F"
     },
     "https://www.facebook.com/photo/?fbid=122124760107279706&set=a.122124760995279706": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/www.facebook.com-ac6241496b68dffc-20261119T115416.410548000Z.html",
+      "saved_at": "2026-11-19T11:54:22.035537345Z",
       "archive_url": "https://web.archive.org/web/20261118102132/https://www.facebook.com/photo/?fbid=122124760107279706&set=a.122124760995279706"
     },
     "https://www.flickr.com/people/aqsnow/": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/www.flickr.com-ff14916b4ffacfcc-20261119T115420.477350000Z.html",
+      "saved_at": "2026-11-19T11:54:29.112198665Z",
       "archive_url": "https://web.archive.org/web/20261118103922/https://www.flickr.com/people/aqsnow/"
     },
     "https://www.instagram.com/aqsnow0": {
-      "status": "blocked",
-      "error": "error:blocked-url"
+      "status": "saved",
+      "file": "xoutlinks/backups/www.instagram.com-9d2d8dc8847a78da-20261119T115421.300336000Z.html",
+      "saved_at": "2026-11-19T11:54:26.222512502Z"
     },
     "https://www.jibc.ca/areas-of-study/emergency-management/search-and-rescue-sar": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/www.jibc.ca-b0b7a0de8b743264-20261119T115422.390792000Z.html",
+      "saved_at": "2026-11-19T11:54:29.664232622Z",
       "archive_url": "https://web.archive.org/web/20260607104900/https://www.jibc.ca/areas-of-study/emergency-management/search-and-rescue-sar"
     },
     "https://www.linkedin.com/in/aqsnow/": {
       "status": "blocked",
-      "error": "error:blocked",
-      "error_msg": "The target site is blocking us. https://www.linkedin.com/in/aqsnow/. (HTTP status=999)."
+      "error": "error:http-999",
+      "error_msg": "HTTP status=999 "
     },
     "https://www.mississauga.com/news/young-entrepreneurs-put-wares-to-the-test-at-trade-show/article_fc942f8e-56b0-5ce3-8d39-8887c4da6e9c.html": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/www.mississauga.com-7fa695e6b65e14a6-20261119T115429.535487000Z.html",
+      "saved_at": "2026-11-19T11:54:41.533455534Z",
       "archive_url": "https://web.archive.org/web/20261118073624/https://www.mississauga.com/news/young-entrepreneurs-put-wares-to-the-test-at-trade-show/article_fc942f8e-56b0-5ce3-8d39-8887c4da6e9c.html"
     },
     "https://www.nfpa.org/codes-and-standards/nfpa-1001-standard-development/1001": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/www.nfpa.org-c5babab7975b14eb-20261119T115430.162506000Z.html",
+      "saved_at": "2026-11-19T11:54:36.326900745Z",
       "archive_url": "https://web.archive.org/web/20261031064355/https://www.nfpa.org/codes-and-standards/nfpa-1001-standard-development/1001"
     },
     "https://www.nfpa.org/codes-and-standards/nfpa-1002-standard-development/1002": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/www.nfpa.org-35cfe8ef03b937a8-20261119T115436.669205000Z.html",
+      "saved_at": "2026-11-19T11:54:43.401912638Z",
       "archive_url": "https://web.archive.org/web/20260720161339/https://www.nfpa.org/codes-and-standards/nfpa-1002-standard-development/1002"
     },
     "https://www.pinterest.com/aqsnow": {
-      "status": "archived",
-      "archive_url": "https://web.archive.org/web/20261118104505/https://www.pinterest.com/aqsnow/"
+      "status": "blocked",
+      "archive_url": "https://web.archive.org/web/20261118104505/https://www.pinterest.com/aqsnow/",
+      "error": "error:blocked",
+      "error_msg": "Page load timed out."
     },
     "https://www.reddit.com/user/aqsnow/": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/www.reddit.com-bae953acad11e462-20261119T115442.255772000Z.html",
+      "saved_at": "2026-11-19T11:54:58.974208563Z",
       "archive_url": "https://web.archive.org/web/20261118110626/https://www.reddit.com/user/aqsnow/?solution=24db86481d60894024db86481d608940&js_challenge=1&jsc_token=2824be10929bdc604753c70a67a1c331cbcbb4c4c50b83a57bb0ba1f8f16286c&jsc_orig_r="
     },
     "https://www.rescuecanada.ca/course-category/swiftwater": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/www.rescuecanada.ca-dd1d7f303d724f98-20261119T115443.746766000Z.html",
+      "saved_at": "2026-11-19T11:54:51.477119634Z",
       "archive_url": "https://web.archive.org/web/20261118081740/https://www.rescuecanada.ca/course-category/swiftwater"
     },
     "https://www.threads.com/@aqsnow0": {
-      "status": "replay_pending",
-      "archive_url": "https://web.archive.org/web/20261118110540/https://www.threads.com/@aqsnow0",
-      "error_msg": "verify archive replay https://web.archive.org/web/20261118110540/https://www.threads.com/@aqsnow0: wayback replay returned HTTP 404",
-      "retry_at": "2026-11-19T04:29:09.313097Z"
+      "status": "saved",
+      "file": "xoutlinks/backups/www.threads.com-5fc0930be4490d01-20261119T115451.789856000Z.html",
+      "saved_at": "2026-11-19T11:54:56.614971649Z",
+      "archive_url": "https://web.archive.org/web/20261119112201/https://www.threads.com/@aqsnow0"
     },
     "https://www.tiktok.com/@aqsnow00": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/www.tiktok.com-27d2025507484b4b-20261119T115456.993078000Z.html",
+      "saved_at": "2026-11-19T11:55:07.911713526Z",
       "archive_url": "https://web.archive.org/web/20261011133107/https://www.tiktok.com/@aqsnow00"
     },
+    "https://www.twitch.tv/aqsnow": {
+      "status": "saved",
+      "file": "xoutlinks/backups/www.twitch.tv-fa0a9dab8c254c81-20261119T115459.288463000Z.html",
+      "saved_at": "2026-11-19T11:55:07.183948465Z",
+      "archive_url": "https://web.archive.org/web/20261119112315/https://www.twitch.tv/aqsnow"
+    },
     "https://www.youtube.com/@aqsnow0": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/www.youtube.com-244d443b0f8066a4-20261119T115507.623114000Z.html",
+      "saved_at": "2026-11-19T11:55:13.758706244Z",
       "archive_url": "https://web.archive.org/web/20261118111308/https://www.youtube.com/@aqsnow0"
     },
     "https://www2.gov.bc.ca/gov/content/health/about-bc-s-health-care-system/partners/colleges-boards-and-commissions/emergency-medical-assistants-licensing-board/licensing": {
-      "status": "archived",
+      "status": "saved",
+      "file": "xoutlinks/backups/www2.gov.bc.ca-de23f8edea079cc1-20261119T115508.386602000Z.html",
+      "saved_at": "2026-11-19T11:55:15.530162285Z",
       "archive_url": "https://web.archive.org/web/20261005064604/https://www2.gov.bc.ca/gov/content/health/about-bc-s-health-care-system/partners/colleges-boards-and-commissions/emergency-medical-assistants-licensing-board/licensing"
     },
     "https://x.com/aqsnow0": {
-      "status": "blocked",
-      "error": "error:blocked-url",
-      "error_msg": "We’re currently facing some limitations when it comes to archiving this site. We apologize for any inconvenience this might cause and appreciate your understanding. Please email us at \"info@archive.org\" if you would like to discuss this more."
+      "status": "saved",
+      "file": "xoutlinks/backups/x.com-0695a89846afbe49-20261119T115514.117063000Z.html",
+      "saved_at": "2026-11-19T11:55:29.460362087Z"
     }
   }
 }

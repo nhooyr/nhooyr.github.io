@@ -6,19 +6,16 @@ import (
 	"strings"
 )
 
-// Domains include subdomains. Path rules match the domain (or www) and subpaths.
-// Rules exclude matching links unless block404 is set, which only blocks 404s.
-var rules = []linkRule{
-	{domain: "github.com", path: "/nhooyr/nhooyr.github.io"}, // This blog's source repository.
-	{domain: "wikipedia.org"},                                // Skip Wikipedia links.
-	{domain: "archive.org"},                                  // Skip Internet Archive links.
+var exclusions = []linkRule{
 	{domain: "linkedin.com", block404: true},                 // Treat LinkedIn 404s as blocked access.
+	{domain: "pinterest.com", blockTimeout: true},            // Treat Pinterest timeouts as blocked access.
 }
 
 type linkRule struct {
-	domain   string
-	path     string
-	block404 bool
+	domain       string
+	path         string
+	block404     bool
+	blockTimeout bool
 }
 
 func (r linkRule) matches(parsed *url.URL) bool {
@@ -36,15 +33,13 @@ func (r linkRule) matches(parsed *url.URL) bool {
 var forbiddenHTTPStatus = regexp.MustCompile(`(?i)\bHTTP\s+status\s*=\s*403\b`)
 var blockedHTTPStatus = regexp.MustCompile(`(?i)\bHTTP\s+(?:status\s*=\s*)?999\b`)
 var missingHTTPStatus = regexp.MustCompile(`(?i)(\bHTTP\s+(?:status\s*=\s*)?)404\b`)
+var timeoutError = regexp.MustCompile(`(?i)\b(?:timeout|timed\s+out|deadline\s+exceeded|ERR_TIMED_OUT)\b`)
 
 func (e Entry) permanentFailure() bool {
-	if e.Status == "needs_auth" {
-		return false
-	}
-	if e.Status == "blocked" || e.Error == blockedURLError || e.Error == "error:blocked" || blockedHTTPStatus.MatchString(e.ErrorMsg) {
+	if e.Status == "blocked" || e.Error == "error:blocked-url" || e.Error == "error:blocked" || blockedHTTPStatus.MatchString(e.ErrorMsg) {
 		return true
 	}
-	return e.Status != "replay_pending" && (e.Error == "error:no-access" || forbiddenHTTPStatus.MatchString(e.ErrorMsg))
+	return e.Error == "error:no-access" || forbiddenHTTPStatus.MatchString(e.ErrorMsg)
 }
 
 func (e Entry) notFound() bool {
@@ -52,15 +47,25 @@ func (e Entry) notFound() bool {
 }
 
 func normalizeFailure(raw string, entry Entry) Entry {
-	if entry.Status == "archived" || entry.Status == "needs_auth" || !entry.notFound() {
+	if entry.Status == "saved" {
 		return entry
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return entry
 	}
-	for _, rule := range rules {
-		if !rule.block404 || !rule.matches(parsed) {
+	for _, rule := range exclusions {
+		if !rule.matches(parsed) {
+			continue
+		}
+		if rule.blockTimeout && timeoutError.MatchString(entry.errorText()) {
+			if entry.ErrorMsg == "" {
+				entry.ErrorMsg = entry.Error
+			}
+			entry.Error = "error:blocked"
+			return entry
+		}
+		if !rule.block404 || !entry.notFound() {
 			continue
 		}
 		entry.Error = "error:no-request"
@@ -70,9 +75,6 @@ func normalizeFailure(raw string, entry Entry) Entry {
 			entry.ErrorMsg = "HTTP status=403"
 		} else if !forbiddenHTTPStatus.MatchString(entry.ErrorMsg) {
 			entry.ErrorMsg += " (HTTP status=403)"
-		}
-		if entry.Status == "replay_pending" {
-			entry.Status = "blocked"
 		}
 		break
 	}
@@ -84,8 +86,8 @@ func excludedLink(raw string) bool {
 	if err != nil {
 		return true
 	}
-	for _, rule := range rules {
-		if !rule.block404 && rule.matches(parsed) {
+	for _, rule := range exclusions {
+		if !rule.block404 && !rule.blockTimeout && rule.matches(parsed) {
 			return true
 		}
 	}
