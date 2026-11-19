@@ -36,6 +36,7 @@ type fakeArchiveService struct {
 	unauthenticated bool
 	availableCalls  []string
 	saveCalls       []string
+	forceCalls      []bool
 	statusCalls     []string
 	availableFn     func(context.Context, string) (string, error)
 	verifyFn        func(context.Context, string) error
@@ -62,9 +63,10 @@ func (f *fakeArchiveService) verifyReplay(ctx context.Context, archive string) e
 	return nil
 }
 
-func (f *fakeArchiveService) save(ctx context.Context, url string) (capture, error) {
+func (f *fakeArchiveService) save(ctx context.Context, url string, force bool) (capture, error) {
 	f.mu.Lock()
 	f.saveCalls = append(f.saveCalls, url)
+	f.forceCalls = append(f.forceCalls, force)
 	f.mu.Unlock()
 	if f.saveFn != nil {
 		return f.saveFn(ctx, url)
@@ -151,6 +153,199 @@ func TestRepeatRunMakesNoRequestsOrFileChanges(t *testing.T) {
 	}
 	if counts != client.counts() || string(before) != string(after) {
 		t.Fatalf("Repeat run did work: calls %v -> %v, changed bytes: %v", counts, client.counts(), string(before) != string(after))
+	}
+}
+
+func TestArchivedEntriesNeverExpire(t *testing.T) {
+	ledger, path := newTestLedger(t)
+	raw := "https://example.com/old"
+	entry := Entry{Status: "archived", ArchiveURL: "https://web.archive.org/web/20100101000000/" + raw}
+	if err := ledger.put(raw, []string{raw}, entry); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeArchiveService{verifyFn: func(context.Context, string) error {
+		t.Error("Completed archive was checked again")
+		return nil
+	}}
+	r := runner{ledger: ledger, client: client, now: func() time.Time { return testNow.AddDate(100, 0, 0) }}
+	if err := r.run(context.Background(), []string{raw}); err != nil || client.counts() != [3]int{} {
+		t.Fatalf("Completed archive expired: %v, %v", err, client.counts())
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(before) != string(after) {
+		t.Fatalf("Completed archive was rewritten: %v", err)
+	}
+}
+
+func TestForceRearchiveOverridesSavedState(t *testing.T) {
+	for _, status := range []string{"archived", "blocked", "failed", "pending", "replay_pending", "needs_auth"} {
+		t.Run(status, func(t *testing.T) {
+			ledger, path := newTestLedger(t)
+			raw := "https://example.com/forced"
+			entry := Entry{Status: status, ArchiveURL: "https://web.archive.org/web/20100101000000/" + raw, ForceRearchive: true}
+			if status == "blocked" {
+				entry.Error = blockedURLError
+			} else if status == "pending" {
+				entry.JobID = "old-job"
+			} else if status == "failed" || status == "replay_pending" {
+				entry.ErrorMsg = "previous failure"
+				entry.RetryAt = testNow.Add(time.Hour).Format(time.RFC3339)
+			}
+			if err := ledger.put(raw, []string{raw}, entry); err != nil {
+				t.Fatal(err)
+			}
+			client := &fakeArchiveService{saveFn: func(context.Context, string) (capture, error) {
+				stored := testReadEntries(t, path)[raw]
+				if stored.Status != "submitting" || !stored.ForceRearchive || stored.RearchiveStartedAt == "" || stored.ArchiveURL != entry.ArchiveURL {
+					t.Errorf("Forced save lost its checkpoint or previous snapshot: %+v", stored)
+				}
+				return capture{JobID: "job:" + raw}, nil
+			}}
+			if err := testRun(t, ledger, client, []string{raw}); err != nil {
+				t.Fatal(err)
+			}
+			if client.counts() != [3]int{0, 1, 1} || !reflect.DeepEqual(client.forceCalls, []bool{true}) {
+				t.Fatalf("Forced save reused a capture or skipped submission: %v, %v", client.counts(), client.forceCalls)
+			}
+			stored := testReadEntries(t, path)[raw]
+			if stored.Status != "archived" || stored.ArchiveURL != testSnapshot(raw) || stored.ForceRearchive || stored.RearchiveStartedAt != "" || stored.Error != "" || stored.ErrorMsg != "" || stored.RetryAt != "" {
+				t.Fatalf("Forced save did not finish cleanly: %+v", stored)
+			}
+			if err := testRun(t, ledger, client, []string{raw}); err != nil || client.counts() != [3]int{0, 1, 1} {
+				t.Fatalf("Completed forced save was repeated: %v, %v", err, client.counts())
+			}
+		})
+	}
+}
+
+func TestForceRearchiveOnFragmentOverridesArchivedBase(t *testing.T) {
+	ledger, path := newTestLedger(t)
+	base := "https://example.com/page"
+	fragment := base + "#section"
+	entries := map[string]Entry{
+		base:     {Status: "archived", ArchiveURL: "https://web.archive.org/web/20100101000000/" + base},
+		fragment: {Status: "archived", ArchiveURL: "https://web.archive.org/web/20100101000000/" + fragment, ForceRearchive: true},
+	}
+	if err := writeJSON(path, database{Version: databaseVersion, Entries: entries}); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := loadLedgerAt(path, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeArchiveService{}
+	if err := testRun(t, ledger, client, []string{base, fragment}); err != nil {
+		t.Fatal(err)
+	}
+	if client.counts() != [3]int{0, 1, 1} || !reflect.DeepEqual(client.forceCalls, []bool{true}) {
+		t.Fatalf("Fragment flag was ignored or duplicated captures: %v, %v", client.counts(), client.forceCalls)
+	}
+	for raw, entry := range testReadEntries(t, path) {
+		if entry.ArchiveURL != testSnapshot(raw) || entry.ForceRearchive || entry.RearchiveStartedAt != "" {
+			t.Errorf("Alias did not receive the refreshed snapshot: %s: %+v", raw, entry)
+		}
+	}
+}
+
+func TestForceRearchiveResumesAfterCancellation(t *testing.T) {
+	for _, phase := range []string{"pending", "replay_pending"} {
+		t.Run(phase, func(t *testing.T) {
+			ledger, path := newTestLedger(t)
+			raw := "https://example.com/forced"
+			if err := ledger.put(raw, []string{raw}, Entry{Status: "archived", ArchiveURL: testSnapshot(raw), ForceRearchive: true}); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			client := &fakeArchiveService{
+				statusFn: func(context.Context, string) (capture, error) {
+					if phase == "pending" {
+						cancel()
+						return capture{}, context.Canceled
+					}
+					return capture{Status: "success", Timestamp: testTimestamp, OriginalURL: raw}, nil
+				},
+				verifyFn: func(context.Context, string) error { cancel(); return context.Canceled },
+			}
+			r := runner{ledger: ledger, client: client, now: fixedTestTime, concurrency: 1}
+			if err := r.run(ctx, []string{raw}); !errors.Is(err, context.Canceled) {
+				t.Fatalf("Forced capture did not stop on cancellation: %v", err)
+			}
+			saved := testReadEntries(t, path)[raw]
+			if saved.Status != phase || !saved.ForceRearchive || saved.RearchiveStartedAt == "" {
+				t.Fatalf("Cancellation lost the forced-capture checkpoint: %+v", saved)
+			}
+			loaded, err := loadLedgerAt(path, testNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resumed := &fakeArchiveService{}
+			if err := testRun(t, loaded, resumed, []string{raw}); err != nil {
+				t.Fatal(err)
+			}
+			want := [3]int{}
+			if phase == "pending" {
+				want[2] = 1
+			}
+			if resumed.counts() != want || testReadEntries(t, path)[raw].ForceRearchive {
+				t.Fatalf("Resume resubmitted the forced capture or retained the flag: %v", resumed.counts())
+			}
+		})
+	}
+}
+
+func TestForcedCaptureRejectsOldSnapshots(t *testing.T) {
+	ledger, path := newTestLedger(t)
+	raw := "https://example.com/forced"
+	old := "https://web.archive.org/web/20100101000000/" + raw
+	if err := ledger.put(raw, []string{raw}, Entry{Status: "archived", ArchiveURL: old, ForceRearchive: true}); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeArchiveService{statusFn: func(context.Context, string) (capture, error) {
+		return capture{Status: "success", Timestamp: "20100101000000", OriginalURL: raw}, nil
+	}}
+	if err := testRun(t, ledger, client, []string{raw}); !errors.Is(err, errIncomplete) {
+		t.Fatalf("Forced capture accepted the old snapshot: %v", err)
+	}
+	if entry := testReadEntries(t, path)[raw]; !entry.ForceRearchive || entry.RearchiveStartedAt == "" || entry.ArchiveURL != old {
+		t.Fatalf("Failed forced capture lost its request or previous snapshot: %+v", entry)
+	}
+	resumed := &fakeArchiveService{availableFn: func(context.Context, string) (string, error) { return old, nil }}
+	if err := testRun(t, ledger, resumed, []string{raw}); err != nil || resumed.counts() != [3]int{1, 1, 1} || !reflect.DeepEqual(resumed.forceCalls, []bool{true}) {
+		t.Fatalf("Retry reused an old indexed snapshot: %v, %v, %v", err, resumed.counts(), resumed.forceCalls)
+	}
+}
+
+func TestForcedCaptureWaitsForCredentialsAndStopsWhenBlocked(t *testing.T) {
+	ledger, path := newTestLedger(t)
+	raw := "https://example.com/forced"
+	if err := ledger.put(raw, []string{raw}, Entry{Status: "archived", ArchiveURL: testSnapshot(raw), ForceRearchive: true}); err != nil {
+		t.Fatal(err)
+	}
+	anonymous := &fakeArchiveService{unauthenticated: true}
+	if err := testRun(t, ledger, anonymous, []string{raw}); !errors.Is(err, errIncomplete) {
+		t.Fatalf("Missing credentials did not defer the forced capture: %v", err)
+	}
+	entry := testReadEntries(t, path)[raw]
+	if entry.Status != "needs_auth" || !entry.ForceRearchive || entry.RearchiveStartedAt != "" || anonymous.counts() != [3]int{} {
+		t.Fatalf("Missing credentials consumed the forced request: %+v", entry)
+	}
+	client := &fakeArchiveService{saveFn: func(context.Context, string) (capture, error) {
+		return capture{Status: "error", StatusExt: "error:blocked", Message: "The target site is blocking us."}, nil
+	}}
+	if err := testRun(t, ledger, client, []string{raw}); !errors.Is(err, errIncomplete) {
+		t.Fatalf("Permanent failure did not report the blocked capture: %v", err)
+	}
+	entry = testReadEntries(t, path)[raw]
+	if entry.Status != "blocked" || entry.ForceRearchive || entry.RearchiveStartedAt != "" || entry.RetryAt != "" {
+		t.Fatalf("Permanent failure retained an automatic forced retry: %+v", entry)
+	}
+	if err := testRun(t, ledger, client, []string{raw}); err != nil || client.counts() != [3]int{0, 1, 0} {
+		t.Fatalf("Blocked forced capture was retried: %v, %v", err, client.counts())
 	}
 }
 
@@ -329,7 +524,7 @@ func TestWaybackLinksAreExcludedWithoutDiscardingArchiveResults(t *testing.T) {
 	if err := ledger.put(archived, []string{archived}, Entry{Status: "pending", JobID: "must-not-poll"}); err != nil {
 		t.Fatal(err)
 	}
-	retained := Entry{Status: "archived", ArchiveURL: archived, ExpiresAt: expiryAfterSixMonths(testNow).Format(time.RFC3339)}
+	retained := Entry{Status: "archived", ArchiveURL: archived}
 	if err := ledger.put(original, []string{original}, retained); err != nil {
 		t.Fatal(err)
 	}
@@ -685,15 +880,12 @@ func TestRetryingStatusFailureKeepsTheExistingJob(t *testing.T) {
 func TestPermanentCaptureFailuresAreSavedAndIgnoredOnLaterRuns(t *testing.T) {
 	for _, failure := range []struct{ name, raw, code, message, wantCode, wantMessage string }{
 		{name: "blocked URL", code: blockedURLError, message: "This URL is on the capture block list."},
+		{name: "blocked code", code: "error:blocked", message: "The target site is blocking us."},
+		{name: "HTTP 999", code: "error:unknown", message: "The target site is blocking us. (HTTP status=999)."},
 		{name: "403 message", code: "error:no-request", message: "The target server blocks access. (HTTP status=403)"},
 		{name: "403 code", code: "error:no-access"},
 		{
 			name: "LinkedIn 404", raw: "https://www.linkedin.com/in/example/",
-			code: "error:not-found", message: "The target server cannot find this page. (HTTP status=404)",
-			wantCode: "error:no-request", wantMessage: "The target server cannot find this page. (HTTP status=403)",
-		},
-		{
-			name: "Threads 404", raw: "https://www.threads.com/@example",
 			code: "error:not-found", message: "The target server cannot find this page. (HTTP status=404)",
 			wantCode: "error:no-request", wantMessage: "The target server cannot find this page. (HTTP status=403)",
 		},
@@ -783,7 +975,7 @@ func TestLoadingDisablesRetriesForPast403Failures(t *testing.T) {
 }
 
 func TestLoadingNormalizesBlocked404Failures(t *testing.T) {
-	for _, domain := range []string{"linkedin.com", "threads.com"} {
+	for _, domain := range []string{"linkedin.com"} {
 		for _, status := range []string{"failed", "replay_pending"} {
 			t.Run(domain+"/"+status, func(t *testing.T) {
 				path := filepath.Join(t.TempDir(), "db.json")
@@ -829,9 +1021,9 @@ func TestBlocked404RuleScope(t *testing.T) {
 		{"https://www.linkedin.com/in/example", true},
 		{"https://ca.linkedin.com/in/example", true},
 		{"https://WWW.LinkedIn.COM./in/example", true},
-		{"https://threads.com/@example", true},
-		{"https://www.threads.com/@example", true},
-		{"https://sub.threads.com/@example", true},
+		{"https://threads.com/@example", false},
+		{"https://www.threads.com/@example", false},
+		{"https://sub.threads.com/@example", false},
 		{"https://notlinkedin.com/in/example", false},
 		{"https://linkedin.com.example.com/in/example", false},
 		{"https://example.com/linkedin.com", false},
@@ -863,7 +1055,7 @@ func TestBlocked404RuleScope(t *testing.T) {
 }
 
 func TestBlocked404ReplayStopsPolling(t *testing.T) {
-	for _, domain := range []string{"linkedin.com", "threads.com"} {
+	for _, domain := range []string{"linkedin.com"} {
 		t.Run(domain, func(t *testing.T) {
 			ledger, path := newTestLedger(t)
 			raw := "https://www." + domain + "/example"
@@ -959,12 +1151,51 @@ func TestTargetStatusClassificationKeepsAuthenticationRetryable(t *testing.T) {
 		{Status: "failed", Error: "error:no-request", ErrorMsg: "HTTP status=429"},
 		{Status: "failed", Error: "error:no-request", ErrorMsg: "HTTP status=500"},
 		{Status: "failed", Error: "error:no-request", ErrorMsg: "HTTP status=4030"},
+		{Status: "failed", Error: "error:no-request", ErrorMsg: "HTTP status=9990"},
+		{Status: "failed", Error: "error:no-request", ErrorMsg: "HTTP status=1999"},
 		{Status: "failed", Error: "error:no-request", ErrorMsg: "HTTP status=404"},
 		{Status: "failed", Error: "error:not-found"},
 		{Status: "failed", Error: "error:target-not-found"},
 	} {
 		if entry.permanentFailure() {
 			t.Errorf("Nonpermanent error was treated as blocked: %+v", entry)
+		}
+	}
+}
+
+func TestLoadingBlocksExplicitBlockErrorsAndHTTP999(t *testing.T) {
+	for _, failure := range []Entry{
+		{Error: "error:blocked", ErrorMsg: "The target site is blocking us."},
+		{ErrorMsg: "The target site is blocking us. (HTTP status=999)."},
+		{ErrorMsg: "wayback returned HTTP 999"},
+	} {
+		for _, status := range []string{"failed", "pending", "replay_pending"} {
+			t.Run(status+"/"+failure.errorText(), func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "db.json")
+				raw := "https://example.com/blocked"
+				entry := failure
+				entry.Status, entry.JobID = status, "old-job"
+				entry.ArchiveURL = testSnapshot(raw)
+				entry.RetryAt = testNow.Add(time.Hour).Format(time.RFC3339)
+				if err := writeJSON(path, database{Version: databaseVersion, Entries: map[string]Entry{raw: entry}}); err != nil {
+					t.Fatal(err)
+				}
+				ledger, err := loadLedgerAt(path, testNow)
+				if err != nil {
+					t.Fatal(err)
+				}
+				entry.Status, entry.JobID, entry.RetryAt = "blocked", "", ""
+				if got := testReadEntries(t, path)[raw]; got != entry {
+					t.Fatalf("Blocked failure retained retries or lost its error: %+v", got)
+				}
+				client := &fakeArchiveService{verifyFn: func(context.Context, string) error {
+					t.Error("Blocked replay was retried")
+					return nil
+				}}
+				if err := testRun(t, ledger, client, []string{raw}); err != nil || client.counts() != [3]int{} {
+					t.Fatalf("Blocked URL caused further work: %v, %v", err, client.counts())
+				}
+			})
 		}
 	}
 }
@@ -1269,20 +1500,26 @@ func TestSaveFormPreservesURLWithoutCapturingOutlinks(t *testing.T) {
 	defer server.Close()
 	client := &Client{httpClient: server.Client(), saveURL: server.URL, authorization: "LOW sample-access:sample-secret"}
 	raw := "https://example.com/search?q=a%2Bb&name=caf%C3%A9&x=one%20two"
-	result, err := client.save(context.Background(), raw)
-	if err != nil || result.JobID != "form-job" {
-		t.Fatalf("Unexpected save result: %+v, %v", result, err)
-	}
-	got := <-details
-	if _, enabled := got.form["capture_outlinks"]; enabled {
-		t.Fatal("Save request must not enable outlink capture")
-	}
-	want := url.Values{"url": {raw}, "skip_first_archive": {"1"}, "if_not_archived_within": {"3600"}}
-	if !reflect.DeepEqual(got.form, want) || got.method != http.MethodPost || got.contentType != "application/x-www-form-urlencoded" {
-		t.Fatalf("Unexpected save request: %+v", got)
-	}
-	if got.authorization != "LOW sample-access:sample-secret" {
-		t.Fatal("Save request omitted authorization")
+	for _, force := range []bool{false, true} {
+		result, err := client.save(context.Background(), raw, force)
+		if err != nil || result.JobID != "form-job" {
+			t.Fatalf("Unexpected save result: %+v, %v", result, err)
+		}
+		got := <-details
+		if _, enabled := got.form["capture_outlinks"]; enabled {
+			t.Fatal("Save request must not enable outlink capture")
+		}
+		within := "3600"
+		if force {
+			within = "0"
+		}
+		want := url.Values{"url": {raw}, "skip_first_archive": {"1"}, "if_not_archived_within": {within}}
+		if !reflect.DeepEqual(got.form, want) || got.method != http.MethodPost || got.contentType != "application/x-www-form-urlencoded" {
+			t.Fatalf("Unexpected save request: %+v", got)
+		}
+		if got.authorization != "LOW sample-access:sample-secret" {
+			t.Fatal("Save request omitted authorization")
+		}
 	}
 }
 
@@ -1357,7 +1594,7 @@ func TestMissingReplayResumesWithoutDuplicateCaptures(t *testing.T) {
 				t.Fatalf("Unplayable snapshot was accepted: %v", err)
 			}
 			entry := testReadEntries(t, path)[raw]
-			if entry.Status != "replay_pending" || entry.ArchiveURL != testSnapshot(raw) || entry.ExpiresAt != "" || !strings.Contains(entry.ErrorMsg, "HTTP 404") || entry.permanentFailure() {
+			if entry.Status != "replay_pending" || entry.ArchiveURL != testSnapshot(raw) || !strings.Contains(entry.ErrorMsg, "HTTP 404") || entry.permanentFailure() {
 				t.Fatalf("Unplayable snapshot was stored as successful or permanent: %+v", entry)
 			}
 			if entry.JobID != "" {
@@ -1401,12 +1638,11 @@ func TestReplayVerificationRespectsRateLimits(t *testing.T) {
 	}
 }
 
-func TestReplayPollingPreservesSnapshotAndExpiryWithoutCredentials(t *testing.T) {
+func TestReplayPollingPreservesSnapshotWithoutCredentials(t *testing.T) {
 	ledger, path := newTestLedger(t)
 	raw := "https://example.com/page"
 	aliases := []string{raw, raw + "#section"}
-	expiry := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
-	entry := Entry{Status: "replay_pending", ArchiveURL: testSnapshot(raw), ExpiresAt: expiry}
+	entry := Entry{Status: "replay_pending", ArchiveURL: testSnapshot(raw)}
 	if err := ledger.put(raw, aliases, entry); err != nil {
 		t.Fatal(err)
 	}
@@ -1433,8 +1669,8 @@ func TestReplayPollingPreservesSnapshotAndExpiryWithoutCredentials(t *testing.T)
 		t.Fatalf("Replay polling performed other requests: %d checks, %v", checks.Load(), client.counts())
 	}
 	for raw, got := range testReadEntries(t, path) {
-		if got.Status != "archived" || got.ArchiveURL != testSnapshot(raw) || got.ExpiresAt != expiry || got.RetryAt != "" || got.Error != "" || got.ErrorMsg != "" {
-			t.Errorf("Replay completion lost the snapshot, expiry, or clean state: %+v", got)
+		if got.Status != "archived" || got.ArchiveURL != testSnapshot(raw) || got.RetryAt != "" || got.Error != "" || got.ErrorMsg != "" {
+			t.Errorf("Replay completion lost the snapshot or clean state: %+v", got)
 		}
 	}
 }
@@ -1448,7 +1684,7 @@ func TestSaveTimeoutIsNeverRetried(t *testing.T) {
 			return nil, context.DeadlineExceeded
 		})},
 	}
-	_, err := client.save(context.Background(), "https://example.com/page")
+	_, err := client.save(context.Background(), "https://example.com/page", false)
 	if err == nil {
 		t.Fatal("Expected timeout")
 	}
@@ -1573,10 +1809,36 @@ func TestHTTPServerErrorStopsSaveWithoutRetry(t *testing.T) {
 	}))
 	defer server.Close()
 	client := &Client{httpClient: server.Client(), saveURL: server.URL, authorization: "LOW sample-access:sample-secret"}
-	_, err := client.save(context.Background(), "https://example.com/page")
+	_, err := client.save(context.Background(), "https://example.com/page", false)
 	var unavailable *serviceUnavailable
 	if !errors.As(err, &unavailable) || requests.Load() != 1 {
 		t.Fatalf("Server error did not halt the save without retry: %d requests, %v", requests.Load(), err)
+	}
+}
+
+func TestHTTP999IsNotRetried(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost} {
+		t.Run(method, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				w.WriteHeader(999)
+			}))
+			defer server.Close()
+			client := &Client{httpClient: server.Client(), saveURL: server.URL, authorization: "LOW sample:secret"}
+			var data url.Values
+			if method == http.MethodPost {
+				data = url.Values{"url": {"https://example.com/page"}}
+			}
+			var result capture
+			err := client.request(context.Background(), method, server.URL, data, &result)
+			if err == nil || requests.Load() != 1 {
+				t.Fatalf("HTTP 999 was retried or accepted: %v, %d requests", err, requests.Load())
+			}
+			if entry := (Entry{Status: "replay_pending", ErrorMsg: err.Error()}); !entry.permanentFailure() {
+				t.Fatalf("HTTP 999 was not classified as permanent: %v", err)
+			}
+		})
 	}
 }
 
@@ -2052,15 +2314,14 @@ func TestConcurrentRateLimitsPreserveLongestCooldown(t *testing.T) {
 	}
 }
 
-func TestLegacyMigrationBackfillsFromTodayOnlyOnce(t *testing.T) {
+func TestUnversionedDatabasePreservesEntries(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "db.json")
 	oldArchive := "https://web.archive.org/web/20100101000000/https://example.com/old"
-	existingExpiry := testNow.AddDate(0, 1, 0).Format(time.RFC3339)
 	legacy := map[string]Entry{
 		"https://example.com/old":      {Status: "archived", ArchiveURL: oldArchive},
 		"https://example.com/pending":  {Status: "pending", ArchiveURL: oldArchive, JobID: "existing-job"},
 		"https://example.com/failed":   {Status: "failed", ArchiveURL: oldArchive, ErrorMsg: "old error"},
-		"https://example.com/existing": {Status: "archived", ArchiveURL: oldArchive, ExpiresAt: existingExpiry},
+		"https://example.com/existing": {Status: "archived", ArchiveURL: oldArchive},
 		"https://example.com/unsaved":  {Status: "ready"},
 	}
 	content, err := json.Marshal(legacy)
@@ -2075,12 +2336,8 @@ func TestLegacyMigrationBackfillsFromTodayOnlyOnce(t *testing.T) {
 	}
 	entries := testReadEntries(t, path)
 	for raw, original := range legacy {
-		want := original
-		if want.ArchiveURL != "" && want.ExpiresAt == "" {
-			want.ExpiresAt = expiryAfterSixMonths(testNow).Format(time.RFC3339)
-		}
-		if got := entries[raw]; got != want {
-			t.Errorf("Migration changed the wrong fields for %s: got %+v, want %+v", raw, got, want)
+		if got := entries[raw]; got != original {
+			t.Errorf("Loading changed fields for %s: got %+v, want %+v", raw, got, original)
 		}
 	}
 	before, _ := os.ReadFile(path)
@@ -2089,254 +2346,7 @@ func TestLegacyMigrationBackfillsFromTodayOnlyOnce(t *testing.T) {
 	}
 	after, _ := os.ReadFile(path)
 	if string(before) != string(after) {
-		t.Fatal("Reloading a migrated database extended expiry or rewrote state")
-	}
-}
-
-func TestVersionedMissingExpiryStaysExpiredAndRefreshes(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "db.json")
-	raw := "https://example.com/old"
-	oldArchive := "https://web.archive.org/web/20100101000000/" + raw
-	stored := database{Version: databaseVersion, Entries: map[string]Entry{raw: {Status: "archived", ArchiveURL: oldArchive}}}
-	content, _ := json.Marshal(stored)
-	if err := os.WriteFile(path, content, 0600); err != nil {
-		t.Fatal(err)
-	}
-	ledger, err := loadLedgerAt(path, testNow)
-	if err != nil {
-		t.Fatal(err)
-	}
-	afterLoad, _ := os.ReadFile(path)
-	entry, _ := ledger.record(raw)
-	if entry.ExpiresAt != "" || string(content) != string(afterLoad) {
-		t.Fatal("Versioned entry was incorrectly given a migration grace period")
-	}
-	client := &fakeArchiveService{}
-	if err := testRun(t, ledger, client, []string{raw}); err != nil {
-		t.Fatal(err)
-	}
-	if got := client.counts(); got != [3]int{0, 1, 1} {
-		t.Fatalf("Missing expiry did not directly refresh: %v", got)
-	}
-	if got := testReadEntries(t, path)[raw]; got.ArchiveURL != testSnapshot(raw) || got.ExpiresAt != expiryAfterSixMonths(testNow).Format(time.RFC3339) {
-		t.Fatalf("Missing-expiry refresh did not save its new expiry: %+v", got)
-	}
-}
-
-func TestFreshExpirySkipsOldSnapshotWithoutRewriting(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	raw := "https://example.com/old"
-	entry := Entry{
-		Status: "archived", ArchiveURL: "https://web.archive.org/web/20100101000000/" + raw,
-		ExpiresAt: testNow.Add(time.Second).Format(time.RFC3339),
-	}
-	if err := ledger.put(raw, []string{raw}, entry); err != nil {
-		t.Fatal(err)
-	}
-	before, _ := os.ReadFile(path)
-	client := &fakeArchiveService{}
-	if err := testRun(t, ledger, client, []string{raw}); err != nil {
-		t.Fatal(err)
-	}
-	after, _ := os.ReadFile(path)
-	if client.counts() != [3]int{} || string(before) != string(after) {
-		t.Fatal("Fresh expiry caused a request or file rewrite based on old snapshot age")
-	}
-}
-
-func TestSixMonthExpiryClampsCalendarMonthEnd(t *testing.T) {
-	for _, test := range []struct{ from, want string }{
-		{"2026-08-31T12:34:56Z", "2027-02-28T12:34:56Z"},
-		{"2023-08-31T12:34:56Z", "2024-02-29T12:34:56Z"},
-		{"2026-10-31T12:34:56Z", "2027-04-30T12:34:56Z"},
-		{"2024-02-29T12:34:56Z", "2024-08-29T12:34:56Z"},
-		{"2026-11-18T12:34:56Z", "2027-05-18T12:34:56Z"},
-	} {
-		t.Run(test.from, func(t *testing.T) {
-			from, _ := time.Parse(time.RFC3339, test.from)
-			if got := expiryAfterSixMonths(from).Format(time.RFC3339); got != test.want {
-				t.Fatalf("Expiry is %s, want %s", got, test.want)
-			}
-		})
-	}
-}
-
-func TestExpiredRefreshRetainsBackupUntilSuccessAndUpdatesAliases(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	base := "https://example.com/page"
-	aliases := []string{base + "#one", base + "#two"}
-	oldArchive := "https://web.archive.org/web/20100101000000/" + base
-	expired := testNow.Format(time.RFC3339)
-	if err := ledger.put(base, aliases, Entry{Status: "archived", ArchiveURL: oldArchive, ExpiresAt: expired}); err != nil {
-		t.Fatal(err)
-	}
-	checkBackup := func(status string) {
-		entries := testReadEntries(t, path)
-		for _, alias := range aliases {
-			_, fragment := splitFragment(alias)
-			got := entries[alias]
-			if got.Status != status || got.ArchiveURL != oldArchive+"#"+fragment || got.ExpiresAt != expired || got.RefreshStartedAt != testNow.Format(time.RFC3339) {
-				t.Errorf("Refresh lost backup during %s: %+v", status, got)
-			}
-		}
-	}
-	client := &fakeArchiveService{
-		saveFn: func(_ context.Context, raw string) (capture, error) {
-			checkBackup("submitting")
-			return capture{JobID: "job:" + raw}, nil
-		},
-		statusFn: func(_ context.Context, _ string) (capture, error) {
-			checkBackup("pending")
-			return capture{Status: "success", Timestamp: testTimestamp, OriginalURL: base}, nil
-		},
-	}
-	if err := testRun(t, ledger, client, aliases); err != nil {
-		t.Fatal(err)
-	}
-	if got := client.counts(); got != [3]int{0, 1, 1} {
-		t.Fatalf("Expired aliases did not share one direct refresh: %v", got)
-	}
-	for alias, got := range testReadEntries(t, path) {
-		if got.Status != "archived" || got.ArchiveURL != testSnapshot(alias) || got.ExpiresAt != expiryAfterSixMonths(testNow).Format(time.RFC3339) || got.RefreshStartedAt != "" {
-			t.Errorf("Successful refresh did not replace backup: %+v", got)
-		}
-	}
-	if err := testRun(t, ledger, client, aliases); err != nil || client.counts() != [3]int{0, 1, 1} {
-		t.Fatalf("Freshly refreshed aliases triggered repeat work: %v, %v", client.counts(), err)
-	}
-}
-
-func TestFailedRefreshRetainsBackupAndRetriesOncePerRun(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	raw := "https://example.com/page"
-	oldArchive := "https://web.archive.org/web/20100101000000/" + raw
-	expired := testNow.Add(-time.Second).Format(time.RFC3339)
-	if err := ledger.put(raw, []string{raw}, Entry{Status: "archived", ArchiveURL: oldArchive, ExpiresAt: expired}); err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeArchiveService{
-		statusFn: func(context.Context, string) (capture, error) {
-			return capture{Status: "error", StatusExt: "error:cannot-fetch"}, nil
-		},
-		availableFn: func(context.Context, string) (string, error) { return oldArchive, nil },
-	}
-	if err := testRun(t, ledger, client, []string{raw}); !errors.Is(err, errIncomplete) {
-		t.Fatalf("Expected failed refresh: %v", err)
-	}
-	entry := testReadEntries(t, path)[raw]
-	if entry.Status != "failed" || entry.ArchiveURL != oldArchive || entry.ExpiresAt != expired {
-		t.Fatalf("Failed refresh discarded or renewed old backup: %+v", entry)
-	}
-	before, _ := os.ReadFile(path)
-	counts := client.counts()
-	if err := testRun(t, ledger, client, []string{raw}); !errors.Is(err, errIncomplete) {
-		t.Fatalf("Expected retry of failed refresh: %v", err)
-	}
-	after, _ := os.ReadFile(path)
-	want := [3]int{counts[0] + 2, counts[1] + 1, counts[2] + 1}
-	if client.counts() != want || string(before) != string(after) {
-		t.Fatal("Failed refresh lost its backup or retried more than once")
-	}
-}
-
-func TestRefreshSnapshotMustBeWithinServerDedupWindow(t *testing.T) {
-	for _, test := range []struct {
-		name string
-		age  time.Duration
-		good bool
-	}{
-		{"exactly one hour", time.Hour, true},
-		{"older than one hour", time.Hour + time.Second, false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			ledger, path := newTestLedger(t)
-			raw := "https://example.com/page"
-			oldArchive := "https://web.archive.org/web/20100101000000/" + raw
-			expired := testNow.Format(time.RFC3339)
-			if err := ledger.put(raw, []string{raw}, Entry{Status: "archived", ArchiveURL: oldArchive, ExpiresAt: expired}); err != nil {
-				t.Fatal(err)
-			}
-			timestamp := testNow.Add(-test.age).Format("20060102150405")
-			client := &fakeArchiveService{statusFn: func(context.Context, string) (capture, error) {
-				return capture{Status: "success", Timestamp: timestamp, OriginalURL: raw}, nil
-			}}
-			err := testRun(t, ledger, client, []string{raw})
-			entry := testReadEntries(t, path)[raw]
-			if test.good {
-				if err != nil || entry.Status != "archived" || entry.ExpiresAt != expiryAfterSixMonths(testNow).Format(time.RFC3339) {
-					t.Fatalf("Recent deduplicated snapshot was rejected: %+v, %v", entry, err)
-				}
-			} else {
-				if !errors.Is(err, errIncomplete) || entry.Status != "failed" || entry.ArchiveURL != oldArchive || entry.ExpiresAt != expired {
-					t.Fatalf("Old snapshot incorrectly renewed backup: %+v, %v", entry, err)
-				}
-				counts := client.counts()
-				want := [3]int{counts[0] + 1, counts[1] + 1, counts[2] + 1}
-				if err := testRun(t, ledger, client, []string{raw}); !errors.Is(err, errIncomplete) || client.counts() != want {
-					t.Fatal("Rejected old snapshot did not receive exactly one refresh attempt")
-				}
-			}
-		})
-	}
-}
-
-func TestPendingRefreshResumesWithoutAnotherSave(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	raw := "https://example.com/page"
-	old := Entry{
-		Status: "pending", JobID: "job:" + raw, ArchiveURL: "https://web.archive.org/web/20100101000000/" + raw,
-		ExpiresAt: testNow.Format(time.RFC3339), RefreshStartedAt: testNow.Format(time.RFC3339),
-	}
-	if err := ledger.put(raw, []string{raw}, old); err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeArchiveService{statusFn: func(context.Context, string) (capture, error) {
-		if got := testReadEntries(t, path)[raw]; got != old {
-			t.Errorf("Resuming pending refresh changed backup: %+v", got)
-		}
-		return capture{Status: "success", Timestamp: testTimestamp, OriginalURL: raw}, nil
-	}}
-	if err := testRun(t, ledger, client, []string{raw}); err != nil || client.counts() != [3]int{0, 0, 1} {
-		t.Fatalf("Pending refresh was not resumed directly: %v, %v", client.counts(), err)
-	}
-}
-
-func TestCanceledRefreshRetriesWithoutLosingBackup(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	raw := "https://example.com/page"
-	oldArchive := "https://web.archive.org/web/20100101000000/" + raw
-	expired := testNow.Format(time.RFC3339)
-	if err := ledger.put(raw, []string{raw}, Entry{Status: "archived", ArchiveURL: oldArchive, ExpiresAt: expired}); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	client := &fakeArchiveService{saveFn: func(context.Context, string) (capture, error) {
-		cancel()
-		return capture{}, context.Canceled
-	}}
-	r := runner{ledger: ledger, client: client, now: fixedTestTime, concurrency: 1}
-	if err := r.run(ctx, []string{raw}); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Expected canceled refresh: %v", err)
-	}
-	entry := testReadEntries(t, path)[raw]
-	if entry.Status != "submitting" || entry.ArchiveURL != oldArchive || entry.ExpiresAt != expired {
-		t.Fatalf("Canceled refresh lost its backup/checkpoint: %+v", entry)
-	}
-	resumed := &fakeArchiveService{
-		availableFn: func(context.Context, string) (string, error) { return oldArchive, nil },
-		saveFn: func(context.Context, string) (capture, error) {
-			if got := testReadEntries(t, path)[raw]; got.ArchiveURL != oldArchive || got.ExpiresAt != expired {
-				t.Errorf("Retry discarded the previous backup: %+v", got)
-			}
-			return capture{JobID: "job:" + raw}, nil
-		},
-	}
-	if err := testRun(t, ledger, resumed, []string{raw}); err != nil {
-		t.Fatalf("Interrupted refresh did not retry: %v", err)
-	}
-	entry = testReadEntries(t, path)[raw]
-	if resumed.counts() != [3]int{1, 1, 1} || entry.Status != "archived" || entry.ArchiveURL != testSnapshot(raw) {
-		t.Fatalf("Interrupted refresh did not save the fresh capture: %+v, %v", entry, resumed.counts())
+		t.Fatal("Reloading a migrated database rewrote state")
 	}
 }
 
@@ -2358,68 +2368,6 @@ func TestUnsupportedDatabaseVersionDoesNotRewriteFile(t *testing.T) {
 	}
 	if string(content) != string(after) {
 		t.Fatal("Unsupported database version was rewritten")
-	}
-}
-
-func TestPendingBackupWithoutRefreshStartCannotRenewFromOldSnapshot(t *testing.T) {
-	for _, expiry := range []string{"", testNow.Add(-time.Hour).Format(time.RFC3339)} {
-		t.Run("expiry="+expiry, func(t *testing.T) {
-			ledger, path := newTestLedger(t)
-			raw := "https://example.com/page"
-			oldArchive := "https://web.archive.org/web/20100101000000/" + raw
-			entry := Entry{Status: "pending", JobID: "old-job", ArchiveURL: oldArchive, ExpiresAt: expiry}
-			if err := ledger.put(raw, []string{raw}, entry); err != nil {
-				t.Fatal(err)
-			}
-			client := &fakeArchiveService{statusFn: func(context.Context, string) (capture, error) {
-				return capture{Status: "success", Timestamp: "20100101000000", OriginalURL: raw}, nil
-			}}
-			if err := testRun(t, ledger, client, []string{raw}); !errors.Is(err, errIncomplete) {
-				t.Fatalf("Old pending snapshot was accepted: %v", err)
-			}
-			stored := testReadEntries(t, path)[raw]
-			if stored.Status != "failed" || stored.ArchiveURL != oldArchive || stored.ExpiresAt != expiry || stored.RefreshStartedAt != testNow.Format(time.RFC3339) {
-				t.Fatalf("Missing refresh boundary incorrectly renewed or discarded the backup: %+v", stored)
-			}
-			if got := client.counts(); got != [3]int{0, 0, 1} {
-				t.Fatalf("Pending backup caused unexpected work: %v", got)
-			}
-		})
-	}
-}
-
-func TestAutomaticRefreshRetryResetsOldFreshnessBoundary(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	raw := "https://example.com/page"
-	oldTimestamp := testNow.Add(-24 * time.Hour).Format("20060102150405")
-	oldArchive := "https://web.archive.org/web/" + oldTimestamp + "/" + raw
-	entry := Entry{
-		Status: "failed", ErrorMsg: "previous refresh failed", ArchiveURL: oldArchive,
-		ExpiresAt:        testNow.Add(-time.Hour).Format(time.RFC3339),
-		RefreshStartedAt: testNow.Add(-48 * time.Hour).Format(time.RFC3339),
-	}
-	if err := ledger.put(raw, []string{raw}, entry); err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeArchiveService{
-		availableFn: func(context.Context, string) (string, error) { return oldArchive, nil },
-		saveFn: func(context.Context, string) (capture, error) {
-			if stored := testReadEntries(t, path)[raw]; stored.RefreshStartedAt != testNow.Format(time.RFC3339) {
-				t.Errorf("Automatic retry retained an obsolete freshness boundary: %+v", stored)
-			}
-			return capture{JobID: "job:" + raw}, nil
-		},
-	}
-	r := runner{ledger: ledger, client: client, now: fixedTestTime, concurrency: 1}
-	if err := r.run(context.Background(), []string{raw}); err != nil {
-		t.Fatal(err)
-	}
-	if got := client.counts(); got != [3]int{1, 1, 1} {
-		t.Fatalf("Retry accepted the old snapshot instead of refreshing: %v", got)
-	}
-	stored := testReadEntries(t, path)[raw]
-	if stored.Status != "archived" || stored.ArchiveURL != testSnapshot(raw) || stored.ExpiresAt != expiryAfterSixMonths(testNow).Format(time.RFC3339) {
-		t.Fatalf("Automatic retry did not renew from the fresh capture: %+v", stored)
 	}
 }
 
@@ -2456,40 +2404,6 @@ func TestCredentialsAutomaticallyResumeNeedsAuthWithoutLookup(t *testing.T) {
 	}
 	if got := testReadEntries(t, path)[raw]; got.Status != "archived" || got.ArchiveURL != testSnapshot(raw) {
 		t.Fatalf("Authentication-resumed capture was not saved: %+v", got)
-	}
-}
-
-func TestMissingCredentialsPreserveExpiredBackupUntilAutomaticResume(t *testing.T) {
-	ledger, path := newTestLedger(t)
-	raw := "https://example.com/page"
-	oldArchive := "https://web.archive.org/web/20100101000000/" + raw
-	expiry := testNow.Add(-time.Hour).Format(time.RFC3339)
-	if err := ledger.put(raw, []string{raw}, Entry{Status: "archived", ArchiveURL: oldArchive, ExpiresAt: expiry}); err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeArchiveService{unauthenticated: true}
-	if err := testRun(t, ledger, client, []string{raw}); !errors.Is(err, errIncomplete) {
-		t.Fatalf("Expired backup requiring credentials should report incomplete work: %v", err)
-	}
-	entry := testReadEntries(t, path)[raw]
-	if client.counts() != [3]int{} || entry.Status != "needs_auth" || entry.ArchiveURL != oldArchive || entry.ExpiresAt != expiry {
-		t.Fatalf("Authentication deferral lost the backup or performed work: %+v, %v", entry, client.counts())
-	}
-	before, _ := os.ReadFile(path)
-	if err := testRun(t, ledger, client, []string{raw}); !errors.Is(err, errIncomplete) {
-		t.Fatalf("Missing credentials should still fail on repeat runs: %v", err)
-	}
-	after, _ := os.ReadFile(path)
-	if client.counts() != [3]int{} || string(before) != string(after) {
-		t.Fatal("Repeated missing credentials caused work")
-	}
-	authenticated := &fakeArchiveService{}
-	if err := testRun(t, ledger, authenticated, []string{raw}); err != nil {
-		t.Fatal(err)
-	}
-	entry = testReadEntries(t, path)[raw]
-	if authenticated.counts() != [3]int{0, 1, 1} || entry.Status != "archived" || entry.ArchiveURL != testSnapshot(raw) {
-		t.Fatalf("Providing credentials did not resume the backup refresh: %+v, %v", entry, authenticated.counts())
 	}
 }
 
@@ -2549,7 +2463,7 @@ func TestAuthenticationRejectionReportsErrorAndDefersRemainingPosts(t *testing.T
 			t.Errorf("Remaining capture was not deferred: %s: %s", raw, got)
 		}
 	}
-	_, err := client.save(context.Background(), "https://example.com/third")
+	_, err := client.save(context.Background(), "https://example.com/third", false)
 	var auth *authenticationError
 	if !errors.As(err, &auth) || posts.Load() != 1 {
 		t.Fatalf("Rejected client posted again: %d, %v", posts.Load(), err)
@@ -2562,7 +2476,6 @@ func TestStatusAuthenticationFailurePreservesJobForResume(t *testing.T) {
 	entry := Entry{
 		Status: "pending", JobID: "job:" + raw,
 		ArchiveURL: "https://web.archive.org/web/20100101000000/" + raw,
-		ExpiresAt:  testNow.Add(-time.Hour).Format(time.RFC3339), RefreshStartedAt: testNow.Format(time.RFC3339),
 	}
 	if err := ledger.put(raw, []string{raw}, entry); err != nil {
 		t.Fatal(err)
@@ -2574,7 +2487,7 @@ func TestStatusAuthenticationFailurePreservesJobForResume(t *testing.T) {
 		t.Fatalf("Status authentication should report incomplete work: %v", err)
 	}
 	stored := testReadEntries(t, path)[raw]
-	if stored.Status != "needs_auth" || stored.JobID != entry.JobID || stored.ArchiveURL != entry.ArchiveURL || stored.ExpiresAt != entry.ExpiresAt {
+	if stored.Status != "needs_auth" || stored.JobID != entry.JobID || stored.ArchiveURL != entry.ArchiveURL {
 		t.Fatalf("Status authentication failure lost the pending job/backup: %+v", stored)
 	}
 	authenticated := &fakeArchiveService{}
@@ -2733,7 +2646,7 @@ func TestSuccessfulEntriesClearRetryAndError(t *testing.T) {
 	if err := ledger.setCooldown(testNow.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	archived := Entry{Status: "archived", ArchiveURL: testSnapshot(base), ExpiresAt: expiryAfterSixMonths(testNow).Format(time.RFC3339)}
+	archived := Entry{Status: "archived", ArchiveURL: testSnapshot(base)}
 	dirty := archived
 	dirty.Error, dirty.ErrorMsg, dirty.RetryAt = "error:old", "old error", until
 	if err := ledger.put(base, aliases, dirty); err != nil {
@@ -2791,7 +2704,7 @@ func TestLoadingPreservesSeparateErrorFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "db.json")
 	completed, pending := "https://example.com/a", "https://example.com/b"
 	until := testNow.Add(2 * time.Hour).Format(time.RFC3339)
-	archived := Entry{Status: "archived", ArchiveURL: testSnapshot(completed), ExpiresAt: expiryAfterSixMonths(testNow).Format(time.RFC3339)}
+	archived := Entry{Status: "archived", ArchiveURL: testSnapshot(completed)}
 	dirty := archived
 	dirty.ErrorMsg = "old error"
 	message := "Full diagnostic: additional details.\nSecond line."
@@ -2828,7 +2741,7 @@ func TestLoadingPreservesSeparateErrorFields(t *testing.T) {
 func TestRateLimitWaitCanBeCanceledAndCooldownSurvives(t *testing.T) {
 	ledger, path := newTestLedger(t)
 	raw := "https://example.com/pending"
-	entry := Entry{Status: "pending", JobID: "existing-job", ArchiveURL: testSnapshot(raw), ExpiresAt: testNow.Format(time.RFC3339)}
+	entry := Entry{Status: "pending", JobID: "existing-job", ArchiveURL: testSnapshot(raw)}
 	if err := ledger.put(raw, []string{raw}, entry); err != nil {
 		t.Fatal(err)
 	}
@@ -2850,7 +2763,7 @@ func TestRateLimitWaitCanBeCanceledAndCooldownSurvives(t *testing.T) {
 		t.Fatalf("Expected cancellation during rate-limit wait: %v", err)
 	}
 	stored := testReadEntries(t, path)[raw]
-	if requests.Load() != 1 || stored.Status != "pending" || stored.JobID != entry.JobID || stored.ArchiveURL != entry.ArchiveURL || stored.ExpiresAt != entry.ExpiresAt || testReadDatabase(t, path).RetryAt == "" {
+	if requests.Load() != 1 || stored.Status != "pending" || stored.JobID != entry.JobID || stored.ArchiveURL != entry.ArchiveURL || testReadDatabase(t, path).RetryAt == "" {
 		t.Fatalf("Cancellation lost pending state or retried: %+v, %d requests", stored, requests.Load())
 	}
 }

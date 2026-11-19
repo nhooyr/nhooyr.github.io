@@ -1,7 +1,7 @@
 // Archive external blog links and retain their Wayback URLs in xoutlinks/db.json.
 // Run from the blog root: ./xoutlinks/run.sh
-// Failed links are retried by default. Archives expire after six
-// months; fresh entries are skipped and pending jobs resume without resubmission.
+// Failed links are retried by default. Completed archives are reused;
+// pending jobs and replay checks resume without resubmission.
 // Set ARCHIVE_ORG_ACCESS_KEY and ARCHIVE_ORG_SECRET_KEY before saving new pages.
 // Entries waiting for credentials resume automatically when credentials exist.
 // Rate-limit cooldowns are saved in the ledger and honored by later runs.
@@ -49,14 +49,15 @@ type database struct {
 }
 
 type Entry struct {
-	Status           string `json:"status"`
-	ArchiveURL       string `json:"archive_url,omitempty"`
-	ExpiresAt        string `json:"expires_at,omitempty"`
-	RefreshStartedAt string `json:"refresh_started_at,omitempty"`
-	JobID            string `json:"job_id,omitempty"`
-	Error            string `json:"error,omitempty"`
-	ErrorMsg         string `json:"error_msg,omitempty"`
-	RetryAt          string `json:"retry_at,omitempty"`
+	Status         string `json:"status"`
+	ArchiveURL     string `json:"archive_url,omitempty"`
+	JobID          string `json:"job_id,omitempty"`
+	Error          string `json:"error,omitempty"`
+	ErrorMsg       string `json:"error_msg,omitempty"`
+	RetryAt        string `json:"retry_at,omitempty"`
+	ForceRearchive bool   `json:"force_rearchive,omitempty"`
+	// Persist the forced request boundary so interrupted saves can be recovered.
+	RearchiveStartedAt string `json:"rearchive_started_at,omitempty"`
 }
 
 func (e Entry) errorText() string {
@@ -225,23 +226,20 @@ func loadLedgerAt(path string, now time.Time) (*Ledger, error) {
 		if entry.Status == "" || ((entry.Status == "archived" || entry.Status == "replay_pending") && !archivePattern.MatchString(entry.ArchiveURL)) {
 			return nil, fmt.Errorf("invalid archive ledger entry: %s", raw)
 		}
-		for _, timestamp := range []string{entry.ExpiresAt, entry.RefreshStartedAt, entry.RetryAt} {
+		for _, timestamp := range []string{entry.RetryAt, entry.RearchiveStartedAt} {
 			if timestamp != "" {
-				if _, err := time.Parse(time.RFC3339, timestamp); err != nil {
+				if _, err := time.Parse(time.RFC3339Nano, timestamp); err != nil {
 					return nil, fmt.Errorf("invalid archive timestamp for %s", raw)
 				}
 			}
 		}
-		// Only the legacy, unversioned database gets this one-time grace period.
-		// In version 1 and later, a missing expiry must remain expired.
-		if !versioned && entry.ArchiveURL != "" && entry.ExpiresAt == "" {
-			entry.ExpiresAt = expiryAfterSixMonths(now).Format(time.RFC3339)
-		}
 		if entry.Status == "archived" && (entry.Error != "" || entry.ErrorMsg != "" || entry.RetryAt != "") {
 			entry.Error, entry.ErrorMsg, entry.RetryAt = "", "", ""
 			rewrite = true
-		} else if entry.permanentFailure() && (entry.Status != "blocked" || entry.JobID != "" || entry.RetryAt != "") {
+		} else if entry.permanentFailure() && (entry.Status != "blocked" || entry.JobID != "" || entry.RetryAt != "" || entry.RearchiveStartedAt != "") {
 			entry.Status, entry.JobID, entry.RetryAt = "blocked", "", ""
+			entry.ForceRearchive = entry.ForceRearchive && entry.RearchiveStartedAt == ""
+			entry.RearchiveStartedAt = ""
 			rewrite = true
 		}
 		l.data[raw] = entry
@@ -258,18 +256,6 @@ func loadLedgerAt(path string, now time.Time) (*Ledger, error) {
 	return l, nil
 }
 
-func expiryAfterSixMonths(now time.Time) time.Time {
-	now = now.UTC()
-	month := time.Date(now.Year(), now.Month()+6, 1, now.Hour(), now.Minute(), now.Second(), 0, time.UTC)
-	lastDay := month.AddDate(0, 1, -1).Day()
-	return time.Date(month.Year(), month.Month(), min(now.Day(), lastDay), now.Hour(), now.Minute(), now.Second(), 0, time.UTC)
-}
-
-func entryExpired(entry Entry, now time.Time) bool {
-	expiry, err := time.Parse(time.RFC3339, entry.ExpiresAt)
-	return err != nil || !now.Before(expiry)
-}
-
 func transition(entry Entry, status string) Entry {
 	entry.Status, entry.JobID, entry.Error, entry.ErrorMsg = status, "", "", ""
 	entry.RetryAt = ""
@@ -279,6 +265,23 @@ func transition(entry Entry, status string) Entry {
 func (l *Ledger) record(base string) (Entry, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	var forced Entry
+	var forcedKey string
+	for raw, entry := range l.data {
+		if !entry.ForceRearchive {
+			continue
+		}
+		if candidate, _ := splitFragment(raw); candidate != base {
+			continue
+		}
+		if forcedKey == "" || raw == base || (forcedKey != base && raw < forcedKey) {
+			forced, forcedKey = entry, raw
+		}
+	}
+	if forcedKey != "" {
+		forced.ArchiveURL, _ = splitFragment(forced.ArchiveURL)
+		return forced, true
+	}
 	if entry, ok := l.data[base]; ok && entry.Status == "archived" {
 		entry.ArchiveURL, _ = splitFragment(entry.ArchiveURL)
 		return entry, true
@@ -309,6 +312,8 @@ func (l *Ledger) put(base string, aliases []string, entry Entry) error {
 		entry.Error, entry.ErrorMsg, entry.RetryAt = "", "", ""
 	} else if entry.permanentFailure() {
 		entry.Status, entry.JobID, entry.RetryAt = "blocked", "", ""
+		entry.ForceRearchive = entry.ForceRearchive && entry.RearchiveStartedAt == ""
+		entry.RearchiveStartedAt = ""
 	}
 	var updated map[string]Entry
 	for raw := range l.data {
@@ -476,7 +481,7 @@ type archiveService interface {
 	authenticated() bool
 	available(context.Context, string) (string, error)
 	verifyReplay(context.Context, string) error
-	save(context.Context, string) (capture, error)
+	save(context.Context, string, bool) (capture, error)
 	status(context.Context, string) (capture, error)
 }
 
@@ -692,10 +697,11 @@ func (c *Client) requestOnce(ctx context.Context, method, endpoint string, data 
 			return false, errReplayNotFound
 		}
 		err := fmt.Errorf("wayback returned HTTP %d", response.StatusCode)
-		if response.StatusCode >= 500 && data != nil {
+		serverError := response.StatusCode >= 500 && response.StatusCode < 600
+		if serverError && data != nil {
 			return false, &serviceUnavailable{message: err.Error() + "; captures paused. Rerun later to recover the submission."}
 		}
-		return response.StatusCode >= 500, err
+		return serverError, err
 	}
 	if method == http.MethodHead {
 		if !archivePattern.MatchString(response.Request.URL.String()) {
@@ -738,10 +744,14 @@ func (c *Client) verifyReplay(ctx context.Context, archive string) error {
 	return nil
 }
 
-func (c *Client) save(ctx context.Context, raw string) (capture, error) {
+func (c *Client) save(ctx context.Context, raw string, force bool) (capture, error) {
 	var result capture
 	// Outlink capture is opt-in; leave it disabled for these per-page requests.
-	err := c.request(ctx, http.MethodPost, c.saveURL, url.Values{"url": {raw}, "skip_first_archive": {"1"}, "if_not_archived_within": {"3600"}}, &result)
+	within := "3600"
+	if force {
+		within = "0"
+	}
+	err := c.request(ctx, http.MethodPost, c.saveURL, url.Values{"url": {raw}, "skip_first_archive": {"1"}, "if_not_archived_within": {within}}, &result)
 	return result, err
 }
 
@@ -775,19 +785,17 @@ func (r *runner) currentTime() time.Time {
 	return time.Now().UTC()
 }
 
-func (r *runner) acceptsArchive(previous Entry, archive string) bool {
-	if previous.RefreshStartedAt == "" {
+func acceptsArchive(entry Entry, archive string) bool {
+	if !entry.ForceRearchive {
 		return true
 	}
-	started, err := time.Parse(time.RFC3339, previous.RefreshStartedAt)
+	started, err := time.Parse(time.RFC3339Nano, entry.RearchiveStartedAt)
 	match := archivePattern.FindStringSubmatch(archive)
 	if err != nil || len(match) != 2 {
 		return false
 	}
 	captured, err := time.Parse("20060102150405", match[1])
-	// SPN may reuse a snapshot made within the last hour. Older snapshots must
-	// not silently renew an expired record.
-	return err == nil && !captured.Before(started.Add(-time.Hour))
+	return err == nil && !captured.Before(started.Truncate(time.Second))
 }
 
 func (r *runner) printf(format string, args ...any) {
@@ -836,7 +844,8 @@ func (r *runner) printRetry(base string, entry Entry, until time.Time) {
 }
 
 func (r *runner) attempt(ctx context.Context, item work) error {
-	if r.retryInterval > 0 && item.entry.Status != "needs_auth" && item.entry.Status != "blocked" {
+	newForce := item.entry.ForceRearchive && item.entry.RearchiveStartedAt == ""
+	if r.retryInterval > 0 && !newForce && item.entry.Status != "needs_auth" && item.entry.Status != "blocked" {
 		if until, err := time.Parse(time.RFC3339Nano, item.entry.RetryAt); err == nil && until.After(r.currentTime()) {
 			r.printRetry(item.base, item.entry, until)
 			return &retryLater{entry: item.entry, delay: until.Sub(r.currentTime())}
@@ -949,8 +958,9 @@ func (r *runner) recover(ctx context.Context, item work, fallback Entry) error {
 		fallback.ErrorMsg += "archive lookup failed: " + err.Error()
 		return r.store(item, fallback)
 	}
-	if archive != "" && r.acceptsArchive(item.entry, archive) {
-		return r.replay(ctx, item, Entry{ArchiveURL: archive})
+	if archive != "" && acceptsArchive(fallback, archive) {
+		fallback.ArchiveURL = archive
+		return r.replay(ctx, item, fallback)
 	}
 	return r.ledger.put(item.base, item.aliases, fallback)
 }
@@ -965,10 +975,7 @@ func (r *runner) replay(ctx context.Context, item work, entry Entry) error {
 	if err := r.client.verifyReplay(ctx, entry.ArchiveURL); err != nil {
 		return r.fail(item, "replay_pending", err)
 	}
-	entry.Status, entry.RefreshStartedAt = "archived", ""
-	if entry.ExpiresAt == "" {
-		entry.ExpiresAt = expiryAfterSixMonths(r.currentTime()).Format(time.RFC3339)
-	}
+	entry.Status, entry.ForceRearchive, entry.RearchiveStartedAt = "archived", false, ""
 	if err := r.store(item, entry); err != nil {
 		return err
 	}
@@ -999,12 +1006,13 @@ func (r *runner) finishJob(ctx context.Context, base string, aliases []string, e
 		switch result.Status {
 		case "success":
 			archive := "https://web.archive.org/web/" + result.Timestamp + "/" + result.OriginalURL
-			if archivePattern.MatchString(archive) && r.acceptsArchive(entry, archive) {
+			if archivePattern.MatchString(archive) && acceptsArchive(entry, archive) {
 				r.printf("%s: captured\n", base)
-				return r.replay(ctx, work{base, aliases, entry}, Entry{ArchiveURL: archive})
+				entry.ArchiveURL = archive
+				return r.replay(ctx, work{base, aliases, entry}, entry)
 			}
 			entry = transition(entry, "failed")
-			entry.ErrorMsg = "wayback returned an old or invalid snapshot instead of refreshing it."
+			entry.ErrorMsg = "wayback returned an old or invalid snapshot."
 			return r.ledger.put(base, aliases, entry)
 		case "error":
 			fallback := result.failure(transition(entry, "failed"))
@@ -1053,6 +1061,11 @@ func (r *runner) process(ctx context.Context, item work) (err error) {
 		}
 	}()
 	entry := item.entry
+	if entry.ForceRearchive && entry.RearchiveStartedAt == "" {
+		entry = transition(entry, "ready")
+		item.entry = entry
+		r.printf("%s: forcing rearchive\n", item.base)
+	}
 	if entry.Status == "needs_auth" && !r.client.authenticated() {
 		return r.store(item, entry)
 	}
@@ -1061,27 +1074,16 @@ func (r *runner) process(ctx context.Context, item work) (err error) {
 	case "replay_pending":
 		return r.replay(ctx, item, entry)
 	case "archived":
-		if !entryExpired(entry, r.currentTime()) {
-			return r.store(item, entry)
-		}
-		entry = transition(entry, "ready")
-		entry.RefreshStartedAt = r.currentTime().Format(time.RFC3339)
+		return r.store(item, entry)
 	case "needs_auth":
 		if entry.JobID != "" {
 			entry.Status, entry.Error, entry.ErrorMsg = "pending", "", ""
 		} else {
 			entry = transition(entry, "ready")
-			if entry.ArchiveURL != "" {
-				entry.RefreshStartedAt = r.currentTime().Format(time.RFC3339)
-			}
 		}
 	case "ready", "pending":
 	default:
 		lookup = true
-	}
-	if entry.ArchiveURL != "" && entryExpired(entry, r.currentTime()) &&
-		(entry.RefreshStartedAt == "" || entry.Status == "failed") {
-		entry.RefreshStartedAt = r.currentTime().Format(time.RFC3339)
 	}
 	item.entry = entry
 	if lookup {
@@ -1090,26 +1092,27 @@ func (r *runner) process(ctx context.Context, item work) (err error) {
 		if err != nil {
 			return r.fail(item, "failed", err)
 		}
-		if archive != "" && r.acceptsArchive(entry, archive) {
+		if archive != "" && acceptsArchive(entry, archive) {
 			r.printf("%s: found: %s\n", item.base, archive)
-			return r.replay(ctx, item, Entry{ArchiveURL: archive})
+			entry.ArchiveURL = archive
+			return r.replay(ctx, item, entry)
 		}
 		entry = transition(entry, "ready")
-		if entry.ArchiveURL != "" {
-			entry.RefreshStartedAt = r.currentTime().Format(time.RFC3339)
-		}
 		item.entry = entry
 	}
 	if entry.Status != "pending" {
 		if !r.client.authenticated() {
 			return r.fail(item, "needs_auth", &authenticationError{"internet archive credentials are required to save this page."})
 		}
+		if entry.ForceRearchive && entry.RearchiveStartedAt == "" {
+			entry.RearchiveStartedAt = r.currentTime().Format(time.RFC3339Nano)
+		}
 		item.entry = transition(entry, "submitting")
 		if err := r.store(item, item.entry); err != nil {
 			return err
 		}
 		r.printf("%s: saving\n", item.base)
-		result, err := r.client.save(ctx, item.base)
+		result, err := r.client.save(ctx, item.base, entry.ForceRearchive)
 		if err != nil {
 			return r.fail(item, "uncertain", err)
 		}
@@ -1146,7 +1149,7 @@ func (r *runner) run(ctx context.Context, urls []string) (runError error) {
 	var items []work
 	for _, base := range sortedKeys(groups) {
 		entry, _ := r.ledger.record(base)
-		if entry.Status == "blocked" {
+		if entry.Status == "blocked" && !entry.ForceRearchive {
 			delete(groups, base)
 			continue
 		}

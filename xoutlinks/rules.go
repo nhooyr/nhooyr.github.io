@@ -13,7 +13,6 @@ var rules = []linkRule{
 	{domain: "wikipedia.org"},                                // Skip Wikipedia links.
 	{domain: "archive.org"},                                  // Skip Internet Archive links.
 	{domain: "linkedin.com", block404: true},                 // Treat LinkedIn 404s as blocked access.
-	{domain: "threads.com", block404: true},                  // Treat Threads 404s as blocked access.
 }
 
 type linkRule struct {
@@ -35,13 +34,17 @@ func (r linkRule) matches(parsed *url.URL) bool {
 }
 
 var forbiddenHTTPStatus = regexp.MustCompile(`(?i)\bHTTP\s+status\s*=\s*403\b`)
+var blockedHTTPStatus = regexp.MustCompile(`(?i)\bHTTP\s+(?:status\s*=\s*)?999\b`)
 var missingHTTPStatus = regexp.MustCompile(`(?i)(\bHTTP\s+(?:status\s*=\s*)?)404\b`)
 
 func (e Entry) permanentFailure() bool {
-	if e.Status == "needs_auth" || e.Status == "replay_pending" {
+	if e.Status == "needs_auth" {
 		return false
 	}
-	return e.Status == "blocked" || e.Error == blockedURLError || e.Error == "error:no-access" || forbiddenHTTPStatus.MatchString(e.ErrorMsg)
+	if e.Status == "blocked" || e.Error == blockedURLError || e.Error == "error:blocked" || blockedHTTPStatus.MatchString(e.ErrorMsg) {
+		return true
+	}
+	return e.Status != "replay_pending" && (e.Error == "error:no-access" || forbiddenHTTPStatus.MatchString(e.ErrorMsg))
 }
 
 func (e Entry) notFound() bool {
