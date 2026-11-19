@@ -1,0 +1,4 @@
+backups/
+.cache/
+db.json.tmp
+dbx.json.tmp
