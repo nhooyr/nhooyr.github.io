@@ -1230,16 +1230,7 @@ func main() {
 	concurrency := flag.Int("concurrency", 3, "maximum simultaneous capture jobs")
 	retryInterval := flag.Duration("retry-interval", 4*time.Minute, "delay before retrying failed captures")
 	credentials := flag.String("credentials", "", "private JSON file containing access_key and secret_key")
-	explain := flag.String("explain", "", "explain whether a URL is excluded without making archive requests")
 	flag.Parse()
-	if *explain != "" {
-		if reason := exclusionReason(*explain); reason != "" {
-			fmt.Printf("%s: excluded: %s\n", *explain, reason)
-		} else {
-			fmt.Printf("%s: eligible: no exclusion rule matched\n", *explain)
-		}
-		return
-	}
 	if *concurrency < 1 {
 		fmt.Fprintln(os.Stderr, "--concurrency must be positive")
 		os.Exit(1)

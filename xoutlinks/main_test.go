@@ -692,6 +692,11 @@ func TestPermanentCaptureFailuresAreSavedAndIgnoredOnLaterRuns(t *testing.T) {
 			code: "error:not-found", message: "The target server cannot find this page. (HTTP status=404)",
 			wantCode: "error:no-request", wantMessage: "The target server cannot find this page. (HTTP status=403)",
 		},
+		{
+			name: "Threads 404", raw: "https://www.threads.com/@example",
+			code: "error:not-found", message: "The target server cannot find this page. (HTTP status=404)",
+			wantCode: "error:no-request", wantMessage: "The target server cannot find this page. (HTTP status=403)",
+		},
 	} {
 		for _, stage := range []string{"save", "status"} {
 			t.Run(failure.name+"/"+stage, func(t *testing.T) {
@@ -777,28 +782,44 @@ func TestLoadingDisablesRetriesForPast403Failures(t *testing.T) {
 	}
 }
 
-func TestLoadingNormalizesLinkedIn404Failures(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "db.json")
-	raw := "https://www.linkedin.com/in/example/"
-	entry := Entry{Status: "failed", Error: "error:not-found", ErrorMsg: "Page not found. (HTTP status=404)", RetryAt: testNow.Add(time.Hour).Format(time.RFC3339)}
-	if err := writeJSON(path, database{Version: databaseVersion, Entries: map[string]Entry{raw: entry}}); err != nil {
-		t.Fatal(err)
-	}
-	ledger, err := loadLedgerAt(path, testNow)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entry.Status, entry.Error, entry.ErrorMsg, entry.RetryAt = "blocked", "error:no-request", "Page not found. (HTTP status=403)", ""
-	if got := testReadEntries(t, path)[raw]; got != entry {
-		t.Fatalf("LinkedIn 404 was not normalized and blocked: %+v", got)
-	}
-	client := &fakeArchiveService{}
-	if err := testRun(t, ledger, client, []string{raw}); err != nil || client.counts() != [3]int{} {
-		t.Fatalf("LinkedIn failure was retried: %v, %v", err, client.counts())
+func TestLoadingNormalizesBlocked404Failures(t *testing.T) {
+	for _, domain := range []string{"linkedin.com", "threads.com"} {
+		for _, status := range []string{"failed", "replay_pending"} {
+			t.Run(domain+"/"+status, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "db.json")
+				raw := "https://www." + domain + "/example"
+				entry := Entry{Status: status, Error: "error:not-found", ErrorMsg: "Page not found. (HTTP status=404)", RetryAt: testNow.Add(time.Hour).Format(time.RFC3339)}
+				wantMessage := "Page not found. (HTTP status=403)"
+				if status == "replay_pending" {
+					entry.ArchiveURL = testSnapshot(raw)
+					entry.Error = ""
+					entry.ErrorMsg = "verify archive replay " + entry.ArchiveURL + ": wayback replay returned HTTP 404"
+					wantMessage = "verify archive replay " + entry.ArchiveURL + ": wayback replay returned HTTP 403"
+				}
+				if err := writeJSON(path, database{Version: databaseVersion, Entries: map[string]Entry{raw: entry}}); err != nil {
+					t.Fatal(err)
+				}
+				ledger, err := loadLedgerAt(path, testNow)
+				if err != nil {
+					t.Fatal(err)
+				}
+				entry.Status, entry.Error, entry.ErrorMsg, entry.RetryAt = "blocked", "error:no-request", wantMessage, ""
+				if got := testReadEntries(t, path)[raw]; got != entry {
+					t.Fatalf("404 was not normalized and blocked: %+v", got)
+				}
+				client := &fakeArchiveService{verifyFn: func(context.Context, string) error {
+					t.Error("Blocked replay was retried")
+					return nil
+				}}
+				if err := testRun(t, ledger, client, []string{raw}); err != nil || client.counts() != [3]int{} {
+					t.Fatalf("Blocked failure was retried: %v, %v", err, client.counts())
+				}
+			})
+		}
 	}
 }
 
-func TestLinkedIn404NormalizationScope(t *testing.T) {
+func TestBlocked404RuleScope(t *testing.T) {
 	original := Entry{Status: "failed", Error: "error:not-found", ErrorMsg: "Page not found. (HTTP status=404)"}
 	for _, test := range []struct {
 		raw     string
@@ -808,9 +829,14 @@ func TestLinkedIn404NormalizationScope(t *testing.T) {
 		{"https://www.linkedin.com/in/example", true},
 		{"https://ca.linkedin.com/in/example", true},
 		{"https://WWW.LinkedIn.COM./in/example", true},
+		{"https://threads.com/@example", true},
+		{"https://www.threads.com/@example", true},
+		{"https://sub.threads.com/@example", true},
 		{"https://notlinkedin.com/in/example", false},
 		{"https://linkedin.com.example.com/in/example", false},
 		{"https://example.com/linkedin.com", false},
+		{"https://notthreads.com/@example", false},
+		{"https://threads.com.example.com/@example", false},
 	} {
 		t.Run(test.raw, func(t *testing.T) {
 			want := original
@@ -833,6 +859,36 @@ func TestLinkedIn404NormalizationScope(t *testing.T) {
 		if got := normalizeFailure("https://www.linkedin.com/in/example", entry); got != entry {
 			t.Errorf("Unrelated result was normalized: %+v", got)
 		}
+	}
+}
+
+func TestBlocked404ReplayStopsPolling(t *testing.T) {
+	for _, domain := range []string{"linkedin.com", "threads.com"} {
+		t.Run(domain, func(t *testing.T) {
+			ledger, path := newTestLedger(t)
+			raw := "https://www." + domain + "/example"
+			if err := ledger.put(raw, []string{raw}, Entry{Status: "replay_pending", ArchiveURL: testSnapshot(raw)}); err != nil {
+				t.Fatal(err)
+			}
+			var checks atomic.Int32
+			client := &fakeArchiveService{verifyFn: func(_ context.Context, archive string) error {
+				checks.Add(1)
+				return fmt.Errorf("verify archive replay %s: %w", archive, errReplayNotFound)
+			}}
+			r := runner{ledger: ledger, client: client, retryInterval: time.Millisecond}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := r.run(ctx, []string{raw}); !errors.Is(err, errIncomplete) {
+				t.Fatalf("New blocked failure was not reported: %v", err)
+			}
+			entry := testReadEntries(t, path)[raw]
+			if entry.Status != "blocked" || entry.Error != "error:no-request" || !strings.HasSuffix(entry.ErrorMsg, "HTTP 403") || entry.RetryAt != "" {
+				t.Fatalf("Replay 404 was not saved as a permanent failure: %+v", entry)
+			}
+			if err := r.run(ctx, []string{raw}); err != nil || checks.Load() != 1 || client.counts() != [3]int{} {
+				t.Fatalf("Blocked replay was retried: %v, %d checks, %v", err, checks.Load(), client.counts())
+			}
+		})
 	}
 }
 
@@ -1992,19 +2048,6 @@ func TestConcurrentRateLimitsPreserveLongestCooldown(t *testing.T) {
 		entry := testReadEntries(t, path)[raw]
 		if entry.Status != "pending" || entry.JobID != "job:"+raw {
 			t.Errorf("Rate limit lost pending job %s: %+v", raw, entry)
-		}
-	}
-}
-
-func TestExclusionReasonAgreesWithMatching(t *testing.T) {
-	for _, raw := range []string{"https://en.wikipedia.org/wiki/Example", "https://github.com/nhooyr/nhooyr.github.io"} {
-		if exclusionReason(raw) == "" || !excludedLink(raw) {
-			t.Errorf("Excluded URL has no explanation: %s", raw)
-		}
-	}
-	for _, raw := range []string{"https://example.org/article", "https://leqra.com", "https://github.com/nhooyr", "https://instagram.com/example"} {
-		if reason := exclusionReason(raw); reason != "" || excludedLink(raw) {
-			t.Errorf("Eligible URL has an exclusion reason: %s: %s", raw, reason)
 		}
 	}
 }
