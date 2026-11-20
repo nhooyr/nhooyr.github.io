@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 if [ "${GITHUB_ACTIONS-}" ]; then
 	sudo apt-get install --yes shfmt
