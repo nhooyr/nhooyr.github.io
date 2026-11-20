@@ -7,8 +7,8 @@ import (
 )
 
 var exclusions = []linkRule{
-	{domain: "linkedin.com", block404: true},                 // Treat LinkedIn 404s as blocked access.
-	{domain: "pinterest.com", blockTimeout: true},            // Treat Pinterest timeouts as blocked access.
+	{domain: "linkedin.com", block404: true},      // Treat LinkedIn 404s as blocked access.
+	{domain: "pinterest.com", blockTimeout: true}, // Treat Pinterest timeouts as blocked access.
 }
 
 type linkRule struct {
