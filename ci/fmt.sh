@@ -6,7 +6,7 @@ if [ "${GITHUB_ACTIONS-}" ]; then
 	sudo apt-get install --yes shfmt
 fi
 
-npx prettier -w --print-width=110 --no-semi --bracket-same-line .
+npx prettier --log-level warn -w --print-width=110 --no-semi --bracket-same-line .
 shfmt -s -w .
 gofmt -s -w .
 
