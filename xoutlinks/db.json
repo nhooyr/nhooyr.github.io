@@ -13,6 +13,11 @@
       "saved_at": "2026-11-19T11:53:02.672885127Z",
       "archive_url": "https://web.archive.org/web/20230102183824/https://allanamartin.peelschools.org/"
     },
+    "https://bsky.app/profile/aqsnow.bsky.social": {
+      "status": "saved",
+      "file": "xoutlinks/backups/bsky.app-43d59e2af78e0868-20261127T203307.284820000Z.html",
+      "saved_at": "2026-11-27T20:33:17.080608038Z"
+    },
     "https://chatgpt.com/u/aqsnow": {
       "status": "saved",
       "file": "xoutlinks/backups/chatgpt.com-093eefe2b96de6b8-20261119T115253.327558000Z.html",
@@ -123,23 +128,16 @@
       "file": "xoutlinks/backups/en.wikipedia.org-56f5374dedc6191d-20261119T122940.599734000Z.html",
       "saved_at": "2026-11-19T12:29:47.967457474Z"
     },
+    "https://gist.github.com/nhooyr": {
+      "status": "saved",
+      "file": "xoutlinks/backups/gist.github.com-99118695b1b9e55d-20261127T203307.284825000Z.html",
+      "saved_at": "2026-11-27T20:33:16.615071785Z"
+    },
     "https://github.com/nhooyr": {
       "status": "saved",
       "file": "xoutlinks/backups/github.com-ce8645d55977829e-20261119T115308.341939000Z.html",
       "saved_at": "2026-11-19T11:53:17.39052867Z",
       "archive_url": "https://web.archive.org/web/20261118094704/https://github.com/nhooyr"
-    },
-    "https://github.com/nhooyr/dotfiles": {
-      "status": "saved",
-      "file": "xoutlinks/backups/github.com-a1ed645f0f00922d-20261119T115310.646023000Z.html",
-      "saved_at": "2026-11-19T11:53:19.971027703Z",
-      "archive_url": "https://web.archive.org/web/20201130090758/https://github.com/nhooyr/dotfiles"
-    },
-    "https://github.com/nhooyr/flappybird": {
-      "status": "saved",
-      "file": "xoutlinks/backups/github.com-40f1829bc5421233-20261119T115313.544673000Z.html",
-      "saved_at": "2026-11-19T11:53:22.065432036Z",
-      "archive_url": "https://web.archive.org/web/20261118090508/https://github.com/nhooyr/flappybird"
     },
     "https://github.com/nhooyr/blog": {
       "status": "saved",
@@ -221,6 +219,18 @@
       "file": "xoutlinks/backups/github.com-1d2136def6a068a7-20261119T123023.562189000Z.html",
       "saved_at": "2026-11-19T12:30:31.368099371Z"
     },
+    "https://github.com/nhooyr/dotfiles": {
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-a1ed645f0f00922d-20261119T115310.646023000Z.html",
+      "saved_at": "2026-11-19T11:53:19.971027703Z",
+      "archive_url": "https://web.archive.org/web/20201130090758/https://github.com/nhooyr/dotfiles"
+    },
+    "https://github.com/nhooyr/flappybird": {
+      "status": "saved",
+      "file": "xoutlinks/backups/github.com-40f1829bc5421233-20261119T115313.544673000Z.html",
+      "saved_at": "2026-11-19T11:53:22.065432036Z",
+      "archive_url": "https://web.archive.org/web/20261118090508/https://github.com/nhooyr/flappybird"
+    },
     "https://github.com/search?q=involves%3Anhooyr&type=issues": {
       "status": "saved",
       "file": "xoutlinks/backups/github.com-7f39660e90ae0a92-20261119T115317.908259000Z.html",
@@ -250,6 +260,11 @@
       "file": "xoutlinks/backups/leqra.com-11476163b8c791b5-20261119T115327.725743000Z.html",
       "saved_at": "2026-11-19T11:53:32.798150888Z",
       "archive_url": "https://web.archive.org/web/20261118081330/https://leqra.com/"
+    },
+    "https://matrix.to/#/@aqsnow:matrix.org": {
+      "status": "saved",
+      "file": "xoutlinks/backups/matrix.to-627b8344c3d4327d-20261127T203307.284820000Z.html",
+      "saved_at": "2026-11-27T20:33:12.355877951Z"
     },
     "https://music.apple.com/profile/aqsnow": {
       "status": "saved",
@@ -298,11 +313,21 @@
       "saved_at": "2026-11-19T11:53:52.981143556Z",
       "archive_url": "https://web.archive.org/web/20261118081158/https://www.snapchat.com/@aqsnow?invite_id=ky28EsBQ&locale=en_CA&share_id=z1MACT62Ss2BDf6gwcEfQw&sid=e8cb0d0061fa4437bc35c20aa2f9acef"
     },
+    "https://sr.ht/~nhooyr/": {
+      "status": "saved",
+      "file": "xoutlinks/backups/sr.ht-259fb9263e7e2446-20261127T203312.902215000Z.html",
+      "saved_at": "2026-11-27T20:33:19.664628408Z"
+    },
     "https://stackexchange.com/users/5377228/nhooyr?tab=accounts": {
       "status": "saved",
       "file": "xoutlinks/backups/stackexchange.com-cd25012b4d79abfc-20261119T115346.091354000Z.html",
       "saved_at": "2026-11-19T11:53:53.24201528Z",
       "archive_url": "https://web.archive.org/web/20261118081209/https://stackexchange.com/users/5377228/nhooyr?tab=accounts"
+    },
+    "https://steamcommunity.com/id/aqsnow/": {
+      "status": "saved",
+      "file": "xoutlinks/backups/steamcommunity.com-3a18ea3a50ffdf6b-20261127T203317.029346000Z.html",
+      "saved_at": "2026-11-27T20:33:21.771593224Z"
     },
     "https://t.me/aqsnow0": {
       "status": "saved",
