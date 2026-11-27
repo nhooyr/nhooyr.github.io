@@ -816,7 +816,7 @@ func TestExclusionsRemainPrecise(t *testing.T) {
 	t.Cleanup(func() { exclusions = previous })
 	for _, raw := range []string{
 		"https://github.com/nhooyr/blog",
-		"https://WWW.GITHUB.COM/NHoOyR/NHoOyR.GITHUB.IO/blob/main/index.html",
+		"https://WWW.GITHUB.COM/NHoOyR/bLoG/blob/main/index.html",
 		"https://wikipedia.org", "https://en.m.wikipedia.org/wiki/Kaslo#History",
 		"https://archive.org", "https://WEB.ARCHIVE.ORG./web/test", "https://a.b.archive.org",
 	} {
