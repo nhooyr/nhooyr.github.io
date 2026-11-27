@@ -1,4 +1,4 @@
-module github.com/nhooyr/nhooyr.github.io
+module github.com/nhooyr/blog
 
 go 1.27.0
 

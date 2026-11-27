@@ -811,11 +811,11 @@ func TestExclusionsRemainPrecise(t *testing.T) {
 	// Test explicit exclusions independently of the user's configured defaults.
 	previous := exclusions
 	exclusions = append(append([]linkRule{}, previous...),
-		linkRule{domain: "github.com", path: "/nhooyr/nhooyr.github.io"},
+		linkRule{domain: "github.com", path: "/nhooyr/blog"},
 		linkRule{domain: "wikipedia.org"}, linkRule{domain: "archive.org"})
 	t.Cleanup(func() { exclusions = previous })
 	for _, raw := range []string{
-		"https://github.com/nhooyr/nhooyr.github.io",
+		"https://github.com/nhooyr/blog",
 		"https://WWW.GITHUB.COM/NHoOyR/NHoOyR.GITHUB.IO/blob/main/index.html",
 		"https://wikipedia.org", "https://en.m.wikipedia.org/wiki/Kaslo#History",
 		"https://archive.org", "https://WEB.ARCHIVE.ORG./web/test", "https://a.b.archive.org",
@@ -825,8 +825,8 @@ func TestExclusionsRemainPrecise(t *testing.T) {
 		}
 	}
 	for _, raw := range []string{
-		"https://github.com/nhooyr", "https://github.com/nhooyr/nhooyr.github.io-other",
-		"https://gist.github.com/nhooyr/nhooyr.github.io", "https://wikipedia.org.example.com",
+		"https://github.com/nhooyr", "https://github.com/nhooyr/blog-other",
+		"https://gist.github.com/nhooyr/blog", "https://wikipedia.org.example.com",
 		"https://notarchive.org", "https://commons.wikimedia.org", "https://leqra.com",
 		"https://discord.gg/invite", "https://www.facebook.com/example", "https://www.linkedin.com/in/test",
 		"https://www.threads.com/example", "https://us05web.zoom.us/j/123?pwd=example",
