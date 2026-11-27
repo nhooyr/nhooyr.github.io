@@ -1,4 +1,4 @@
-# blog [![ci](https://github.com/nhooyr/nhooyr.github.io/actions/workflows/ci.yml/badge.svg)](https://github.com/nhooyr/nhooyr.github.io/actions/workflows/ci.yml) [![pages-build-deployment](https://github.com/nhooyr/nhooyr.github.io/actions/workflows/pages/pages-build-deployment/badge.svg)](https://github.com/nhooyr/nhooyr.github.io/actions/workflows/pages/pages-build-deployment)
+# blog [![ci](https://github.com/nhooyr/nhooyr.github.io/actions/workflows/ci.yml/badge.svg)](https://github.com/nhooyr/nhooyr.github.io/actions/workflows/ci.yml) [![deploy](https://github.com/nhooyr/nhooyr.github.io/actions/workflows/deploy.yml/badge.svg)](https://github.com/nhooyr/nhooyr.github.io/actions/workflows/deploy.yml)
 
 [aqsnow.ca](https://aqsnow.ca)
 
